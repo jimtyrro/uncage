@@ -3,20 +3,26 @@ import { FORMAT_ALIASES } from '../types.js';
 import { reactTsStrategy } from './react-ts.js';
 import { reactJsStrategy } from './react-js.js';
 import { htmlStrategy } from './html.js';
+import { astroStrategy } from './astro.js';
 
 export const strategies: Record<ExportFormat, ExporterStrategy> = {
   'react-ts': reactTsStrategy,
   'react-js': reactJsStrategy,
   'html': htmlStrategy,
+  'astro': astroStrategy,
 };
 
-// React/TSX/JSX export is paused. Static HTML is the only user-facing format.
-// The react strategies stay in the codebase for future work — they are simply
-// not selectable. resolveFormat always yields the static HTML strategy.
+// React/TSX/JSX export is paused; Static HTML is the only user-facing format
+// upstream. Astro is a local addition on top of that pivot (formats/astro.ts,
+// not present upstream) — resolveFormat special-cases it below so it stays
+// selectable via `-f astro` without reopening React.
 export function resolveFormat(input?: string): ExporterStrategy {
   if (input) {
     const normalized = input.trim().toLowerCase();
     const resolvedFormat = FORMAT_ALIASES[normalized];
+    if (resolvedFormat === 'astro') {
+      return astroStrategy;
+    }
     if (resolvedFormat === 'react-ts' || resolvedFormat === 'react-js') {
       console.warn('  ⚠️ React export is paused; producing Static HTML instead.');
     } else if (!resolvedFormat) {
@@ -32,4 +38,4 @@ export async function promptFormat(): Promise<ExporterStrategy> {
   return htmlStrategy;
 }
 
-export { reactTsStrategy, reactJsStrategy, htmlStrategy };
+export { reactTsStrategy, reactJsStrategy, htmlStrategy, astroStrategy };

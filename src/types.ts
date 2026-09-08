@@ -1,4 +1,4 @@
-export type ExportFormat = 'react-ts' | 'react-js' | 'html';
+export type ExportFormat = 'react-ts' | 'react-js' | 'html' | 'astro';
 
 export type ProgressEventKind = 'phase' | 'page' | 'asset' | 'warn' | 'info' | 'done' | 'error';
 
@@ -57,4 +57,9 @@ export const FORMAT_ALIASES: Record<string, ExportFormat> = {
   'vanilla': 'html',
   'html-css-js': 'html',
   'plain': 'html',
+
+  // Astro is a local addition on top of upstream's static-HTML-only pivot
+  // (see formats/astro.ts) — kept out of upstream's own FORMAT_ALIASES.
+  'astro': 'astro',
+  'astrojs': 'astro',
 };

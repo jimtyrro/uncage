@@ -4,7 +4,8 @@ import { chromium } from 'playwright-extra';
 import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { runWizard, printBanner } from './wizard.js';
 import { sanitizeFileName } from './constants.js';
-import { cloneToStaticHtml } from './pipeline.js';
+import { cloneToStaticHtml, cloneToAstro } from './pipeline.js';
+import { resolveFormat } from './formats/index.js';
 import { startWebUI } from './server.js';
 import type { ExtractorOptions } from './types.js';
 
@@ -14,7 +15,7 @@ const program = new Command();
 
 program
   .name('uncage')
-  .description('Clone any website into a standalone static HTML/CSS/JS project. React/TSX/JSX export is paused.')
+  .description('Clone any website into a standalone static HTML/CSS/JS project, or an Astro project via -f astro. React/TSX/JSX export is paused.')
   .argument('[url]', 'The target URL to clone (omit to launch the web UI)')
   .option('-o, --output <dir>', 'Output directory name', '')
   .option('--port <number>', 'Web UI port (when launching the UI)', (val) => {
@@ -53,6 +54,7 @@ program
   }, [])
   .option('--no-purge', 'Skip PurgeCSS optimization to retain dynamically applied classes')
   .option('--keep-analytics', 'Retain third-party analytics and tracking scripts in the exported project', false)
+  .option('-f, --format <format>', 'Export format: html (default) or astro', 'html')
   .action(async (targetUrl?: string, opts?: {
     output?: string;
     port?: number;
@@ -70,6 +72,7 @@ program
     blockUrl?: string[];
     purge?: boolean;
     keepAnalytics?: boolean;
+    format?: string;
   }) => {
     try {
       // No URL (or explicit --ui) → launch the web UI for non-technical users.
@@ -116,8 +119,11 @@ program
       // extract() sanitizes the name internally; print the same name it will use
       const displayOutputName = sanitizeFileName(outputName) || 'extracted-site';
 
+      const strategy = resolveFormat(opts?.format);
+      const isAstro = strategy.format === 'astro';
+
       console.log(`  Target: ${url}`);
-      console.log(`  Format: Static HTML / CSS / JS`);
+      console.log(`  Format: ${isAstro ? 'Astro (.astro pages)' : 'Static HTML / CSS / JS'}`);
       console.log(`  Output: output/${displayOutputName}\n`);
 
       const cloneOptions: ExtractorOptions & { purge?: boolean; keepAnalytics?: boolean } = {
@@ -126,7 +132,7 @@ program
       if (opts?.purge !== undefined) cloneOptions.purge = opts.purge;
       if (opts?.keepAnalytics !== undefined) cloneOptions.keepAnalytics = opts.keepAnalytics;
 
-      await cloneToStaticHtml(url, outputName, cloneOptions);
+      await (isAstro ? cloneToAstro : cloneToStaticHtml)(url, outputName, cloneOptions);
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`\n  ✅ Successfully exported in ${elapsed}s!`);
