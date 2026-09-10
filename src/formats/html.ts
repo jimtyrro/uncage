@@ -162,6 +162,22 @@ export const htmlStrategy: ExporterStrategy = {
         }
       });
 
+      // Strip stale Subresource Integrity hashes on rewritten <link>/<script>
+      // tags. `integrity` is computed against the ORIGINAL remote file's
+      // exact bytes; once the href/src points at our local capture, the hash
+      // no longer matches and browsers silently refuse to load the resource
+      // at all (it just never appears in document.styleSheets/executes) -
+      // no console error, no visible failure mode, just a page that's
+      // unstyled or missing its interaction JS with no obvious cause.
+      // `crossorigin` is meaningless too once the resource is same-origin.
+      $('link[integrity], script[integrity]').each((_, el) => {
+        const url = $(el).attr('href') || $(el).attr('src') || '';
+        if (url.includes('assets/')) {
+          $(el).removeAttr('integrity');
+          $(el).removeAttr('crossorigin');
+        }
+      });
+
       // srcset is a space/comma-separated list of URLs — relativize each entry.
       $('[srcset]').each((_, el) => {
         const val = $(el).attr('srcset');

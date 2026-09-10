@@ -89,6 +89,21 @@ export const astroStrategy: ExporterStrategy = {
       $('#__framer-badge-container').remove();
       $('script[data-fid]').remove();
 
+      // Same stale-SRI-hash bug as html.ts: integrity is computed against
+      // the original remote file's bytes, not our local capture - once
+      // href/src is rewritten, the browser silently drops the resource
+      // (missing from document.styleSheets/never executes, no console
+      // error). Confirmed live on a Webflow capture: this alone was why
+      // the whole page rendered unstyled with jQuery/Webflow's own
+      // interaction JS never running.
+      $('link[integrity], script[integrity]').each((_, el) => {
+        const url = $(el).attr('href') || $(el).attr('src') || '';
+        if (url.includes('assets/')) {
+          $(el).removeAttr('integrity');
+          $(el).removeAttr('crossorigin');
+        }
+      });
+
       const promoClass = detectPromoWidgetClass($);
 
       let html = '<!DOCTYPE html>\n' + $.html();
