@@ -522,6 +522,41 @@ try {
           }).catch(() => {});
 
 await new Promise(r => setTimeout(r, 300));
+
+          // Force-download every srcset variant, not just whichever size the
+          // browser's own responsive-image algorithm picked for this crawl
+          // viewport. A browser only ever requests ONE entry from a srcset -
+          // sites shipping multiple sizes (Webflow does, by default) leave
+          // every OTHER size, and often the base <img src> fallback itself
+          // (a distinct, still-larger variant), pointing at the live remote
+          // CDN forever, since our own network interceptor below only ever
+          // sees what the browser actually requested. These fetch() calls
+          // pass through that same interceptor and get saved identically -
+          // no separate save path needed, just requests the interceptor
+          // wouldn't otherwise see.
+          const srcsetUrls = await page.evaluate(() => {
+            const urls = new Set<string>();
+            document.querySelectorAll('[srcset]').forEach((el) => {
+              (el.getAttribute('srcset') || '').split(',').forEach((entry) => {
+                const url = entry.trim().split(/\s+/)[0];
+                if (url) urls.add(url);
+              });
+            });
+            document.querySelectorAll('img[srcset]').forEach((el) => {
+              const src = el.getAttribute('src');
+              if (src) urls.add(src);
+            });
+            return Array.from(urls);
+          }).catch(() => [] as string[]);
+
+          const missingSrcsetUrls = srcsetUrls.filter((u) => {
+            try { return !assetMap[new URL(u, currentUrl).href]; } catch { return false; }
+          });
+          if (missingSrcsetUrls.length > 0) {
+            await page.evaluate((urls: string[]) => {
+              return Promise.all(urls.map((u) => fetch(u, { cache: 'no-store' }).catch(() => {})));
+            }, missingSrcsetUrls).catch(() => {});
+          }
         }
 
         // Get HTML - use page.content() in safe mode (no JS), page.evaluate() in normal mode
