@@ -119,20 +119,25 @@ export const astroStrategy: ExporterStrategy = {
       html = html.replace(/<style(?=[ >])/g, '<style is:global');
       html = html.replace(/<script(?=[ >])/g, '<script is:inline');
 
-      // Neutralize hydration-resistant Framer widgets (marketplace cross-sell
-      // card, the edit-bar iframe, and — on Framer Commerce sites — its own
-      // attribution badge) with a small guard script rather than trying to
-      // delete them from the markup: all of these get unconditionally
-      // re-created by client-side JS on every page load regardless of what
-      // ships in the server HTML. Confirmed live: the static #remove() calls
-      // above delete #__framer-editorbar from the served markup, but
-      // Framer's own runtime re-inserts it as a hidden iframe within a few
-      // hundred ms of load — same failure mode as the marketplace card.
+      // Neutralize hydration-resistant widgets (Framer's marketplace
+      // cross-sell card, edit-bar iframe, and attribution badge; Webflow's
+      // own "Made in Webflow" badge) with a small guard script rather than
+      // trying to delete them from the markup: all of these get
+      // unconditionally re-created by client-side JS on every page load
+      // regardless of what ships in the server HTML. Confirmed live on two
+      // separate platforms: a static #remove() deletes #__framer-editorbar
+      // from the served Framer markup, but its own runtime re-inserts it as
+      // a hidden iframe within a few hundred ms; .w-webflow-badge isn't even
+      // present in Webflow's captured static HTML at all - webflow.js
+      // injects it fresh at runtime, so there's nothing to statically
+      // remove in the first place. Harmless no-op on sites from neither
+      // platform - the observer just never finds a match.
       const guardTargets = [
         promoClass ? `.${promoClass}` : null,
         '[data-framercommerce-widget]',
         '#__framer-editorbar',
         '#__framer-badge-container',
+        '.w-webflow-badge',
       ].filter(Boolean) as string[];
       if (guardTargets.length > 0) {
         const selector = JSON.stringify(guardTargets.join(','));

@@ -148,6 +148,19 @@ export const htmlStrategy: ExporterStrategy = {
     </script>`);
       }
 
+      // Webflow's own "Made in Webflow" attribution badge (.w-webflow-badge)
+      // is injected by webflow.js at runtime, not present in the captured
+      // static HTML at all - confirmed live on a Webflow capture: absent
+      // from the source, but appears fixed bottom-right once the page's own
+      // JS runs. Same re-hydration category as Framer's badge/marketplace
+      // card above: a static #remove() has nothing to remove, so guard it
+      // the same way, removing it on insertion. Harmless no-op on
+      // non-Webflow sites (the observer just never finds a match).
+      $('head').append(`
+    <script data-uncage-webflow-badge-guard>
+      (function(){function h(el){el.remove()}function scan(){document.querySelectorAll(".w-webflow-badge").forEach(h)}scan();new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true})})();
+    </script>`);
+
       // Relativize root-relative asset URLs (/assets/ -> ./assets/ or ../assets/)
       // for direct file:// browsing. Walk attributes with Cheerio instead of regex
       // so data-* attributes and srcset are handled deterministically.
