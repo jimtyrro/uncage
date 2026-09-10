@@ -334,8 +334,9 @@ This folder is 100% static and ready to drag-and-drop to:
       }
     } catch {}
 
-    // 4.6. Mirror assets at their ORIGINAL full pathname, not just their
-    // original basename (which 4.5 above already handles).
+    // 4.6. Mirror assets at their ORIGINAL full pathname (any top-level
+    // directory, not just /assets/), not just their original basename
+    // (which 4.5 above already handles).
     //
     // Client-side frameworks bake asset paths into their JS bundles at build
     // time and re-assert them on hydration. Next.js is the clear case: React
@@ -344,6 +345,16 @@ This folder is 100% static and ready to drag-and-drop to:
     // path in our captured markup. Since we flatten directories AND hash
     // filenames, that path resolves to nothing and every hydrated image
     // 404s, even though the file is right there under another name.
+    //
+    // Framework-owned static assets are the more important case of this:
+    // Next.js ships its OWN chunks/CSS/fonts under /_next/static/ - not
+    // under whatever path a given site's own images happen to use. A
+    // missing /_next/static/chunks/app/<route>/page-<hash>.js 404s as a
+    // ChunkLoadError on client-side navigation to that route and crashes
+    // the whole page ("Application error: a client-side exception has
+    // occurred"), not just a broken <img>. Originally scoped this mirror to
+    // /assets/ only - wrong, missed exactly this case; broadened to mirror
+    // any captured asset at its real original path.
     //
     // Fixing the markup is pointless (hydration overwrites it again) and
     // stripping the bundle kills the site's real interactivity. Satisfying
@@ -360,12 +371,17 @@ This folder is 100% static and ready to drag-and-drop to:
           if (!localRelPath) continue;
           try {
             const originalPath = decodeURIComponent(new URL(remoteUrl).pathname);
-            // Only same-shape asset paths; never write outside assets/.
-            if (!originalPath.startsWith('/assets/')) continue;
             const savedFileOnDisk = path.join(outputDir, localRelPath.replace(/^\//, ''));
             const mirrorTarget = path.join(outputDir, originalPath.replace(/^\//, ''));
-            const rootAssets = path.join(outputDir, 'assets');
-            if (!path.resolve(mirrorTarget).startsWith(path.resolve(rootAssets))) continue;
+            // Guard against path traversal / escaping outputDir; otherwise
+            // mirror ANY original path, not just /assets/. Framework-owned
+            // static assets are the important case - Next.js ships its own
+            // chunks/CSS/fonts under /_next/static/, a completely different
+            // top-level directory from wherever a given site's own images
+            // happen to live, and route-specific JS chunks 404ing there is
+            // exactly what breaks client-side navigation with a full
+            // "Application error" crash, not just a missing image.
+            if (!path.resolve(mirrorTarget).startsWith(path.resolve(outputDir) + path.sep)) continue;
             if (path.resolve(mirrorTarget) === path.resolve(savedFileOnDisk)) continue;
             if (await fs.stat(mirrorTarget).catch(() => null)) continue;
             const stat = await fs.stat(savedFileOnDisk).catch(() => null);
