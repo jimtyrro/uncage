@@ -321,6 +321,55 @@ This folder is 100% static and ready to drag-and-drop to:
       }
     } catch {}
 
+    // 4.6. Mirror assets at their ORIGINAL full pathname, not just their
+    // original basename (which 4.5 above already handles).
+    //
+    // Client-side frameworks bake asset paths into their JS bundles at build
+    // time and re-assert them on hydration. Next.js is the clear case: React
+    // re-renders and sets <img src> back to e.g. "/assets/images/logo/logo-dark.png"
+    // - the path as authored in the app - overwriting the rewritten local
+    // path in our captured markup. Since we flatten directories AND hash
+    // filenames, that path resolves to nothing and every hydrated image
+    // 404s, even though the file is right there under another name.
+    //
+    // Fixing the markup is pointless (hydration overwrites it again) and
+    // stripping the bundle kills the site's real interactivity. Satisfying
+    // the path the bundle already asks for costs nothing and leaves both
+    // intact. Hardlinked, so the mirror adds no disk usage; copy is the
+    // fallback for filesystems/volumes that refuse the link.
+    try {
+      const mapPath = path.join(outputDir, 'asset-map.json');
+      const rawMap = await fs.readFile(mapPath, 'utf-8').catch(() => null);
+      if (rawMap) {
+        const assetMap = JSON.parse(rawMap) as Record<string, string>;
+        let mirrored = 0;
+        for (const [remoteUrl, localRelPath] of Object.entries(assetMap)) {
+          if (!localRelPath) continue;
+          try {
+            const originalPath = decodeURIComponent(new URL(remoteUrl).pathname);
+            // Only same-shape asset paths; never write outside assets/.
+            if (!originalPath.startsWith('/assets/')) continue;
+            const savedFileOnDisk = path.join(outputDir, localRelPath.replace(/^\//, ''));
+            const mirrorTarget = path.join(outputDir, originalPath.replace(/^\//, ''));
+            const rootAssets = path.join(outputDir, 'assets');
+            if (!path.resolve(mirrorTarget).startsWith(path.resolve(rootAssets))) continue;
+            if (path.resolve(mirrorTarget) === path.resolve(savedFileOnDisk)) continue;
+            if (await fs.stat(mirrorTarget).catch(() => null)) continue;
+            const stat = await fs.stat(savedFileOnDisk).catch(() => null);
+            if (!stat || !stat.isFile()) continue;
+            await fs.mkdir(path.dirname(mirrorTarget), { recursive: true });
+            await fs.link(savedFileOnDisk, mirrorTarget).catch(async () => {
+              await fs.copyFile(savedFileOnDisk, mirrorTarget).catch(() => {});
+            });
+            mirrored++;
+          } catch {}
+        }
+        if (mirrored > 0) {
+          console.log(`  [Assembler] Mirrored ${mirrored} asset(s) at their original paths (for client-side frameworks that re-assert build-time paths on hydration)`);
+        }
+      }
+    } catch {}
+
     // 5. Clean up temporary captured-raw*.html files from output directory
     try {
       const files = await fs.readdir(outputDir);
