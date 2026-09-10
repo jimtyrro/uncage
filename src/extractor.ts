@@ -534,7 +534,17 @@ await new Promise(r => setTimeout(r, 300));
           // pass through that same interceptor and get saved identically -
           // no separate save path needed, just requests the interceptor
           // wouldn't otherwise see.
-          const srcsetUrls = await page.evaluate(() => {
+          //
+          // Same problem, worse symptom, for <video><source> backgrounds:
+          // an autoplay/loop/muted background video only actually starts
+          // its network request once the browser decides to play it, which
+          // doesn't reliably happen during a single automated crawl pass.
+          // The result on a real (non-localhost) deployment isn't a broken
+          // image, it's every single pageview doing a live multi-MB fetch
+          // from the original site's CDN before the video can even start -
+          // exactly what reads as "stutter" on first load, every load,
+          // since nothing is ever cached locally.
+          const mediaUrls = await page.evaluate(() => {
             const urls = new Set<string>();
             document.querySelectorAll('[srcset]').forEach((el) => {
               (el.getAttribute('srcset') || '').split(',').forEach((entry) => {
@@ -546,16 +556,24 @@ await new Promise(r => setTimeout(r, 300));
               const src = el.getAttribute('src');
               if (src) urls.add(src);
             });
+            document.querySelectorAll('video source[src], video[src]').forEach((el) => {
+              const src = el.getAttribute('src');
+              if (src) urls.add(src);
+            });
             return Array.from(urls);
           }).catch(() => [] as string[]);
 
-          const missingSrcsetUrls = srcsetUrls.filter((u) => {
+          const missingMediaUrls = mediaUrls.filter((u) => {
             try { return !assetMap[new URL(u, currentUrl).href]; } catch { return false; }
           });
-          if (missingSrcsetUrls.length > 0) {
+          if (missingMediaUrls.length > 0) {
             await page.evaluate((urls: string[]) => {
-              return Promise.all(urls.map((u) => fetch(u, { cache: 'no-store' }).catch(() => {})));
-            }, missingSrcsetUrls).catch(() => {});
+              return Promise.all(urls.map((u) => {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 30000);
+                return fetch(u, { cache: 'no-store', signal: controller.signal }).catch(() => {}).finally(() => clearTimeout(timeout));
+              }));
+            }, missingMediaUrls).catch(() => {});
           }
         }
 
