@@ -18,8 +18,13 @@ export function routeToAstroFilename(route: string): string {
  * Its wrapper element has no stable id/class (the class is a per-template
  * content hash), so we detect it structurally: find the marketplace-listing
  * anchors (framer.com/@<author>/?tab=marketplace, or
- * framer.com/community/marketplace/templates/*) and take the nearest common
- * ancestor's first class as the identity selector to neutralize.
+ * framer.com/community/marketplace/templates/*, or the framer.link/<slug>
+ * short-domain form some newer templates use for the same "Get it for FREE"
+ * widget — confirmed live: a template whose card linked to
+ * framer.link/Dermato went undetected under the framer.com-only patterns,
+ * so the widget rendered on every page uncaught by either the static removal
+ * or the runtime guard) and take the nearest common ancestor's first class
+ * as the identity selector to neutralize.
  *
  * The href match must stay narrow: some templates also carry an unrelated
  * "design credit" link to framer.com/marketplace/creator/<author> elsewhere
@@ -27,7 +32,8 @@ export function routeToAstroFilename(route: string): string {
  * match that also caught that link computed a "common ancestor" all the way
  * up at the page's own root wrapper — and the resulting guard script then
  * deleted the entire page on every hydration. `isLayoutRoot` is a second,
- * independent safety net against exactly that failure mode.
+ * independent safety net against exactly that failure mode, and applies
+ * regardless of which anchor pattern matched.
  */
 function isLayoutRoot($: cheerio.CheerioAPI, el: any): boolean {
   const node = $(el);
@@ -38,10 +44,11 @@ function isLayoutRoot($: cheerio.CheerioAPI, el: any): boolean {
 }
 
 function detectPromoWidgetClass($: cheerio.CheerioAPI): string | null {
-  const anchors = $('a[href*="framer.com"]').filter((_, el) => {
+  const anchors = $('a[href*="framer.com"], a[href*="framer.link"]').filter((_, el) => {
     const href = $(el).attr('href') || '';
     return /framer\.com\/@[^/"']+\/\?tab=marketplace/i.test(href) ||
-      /framer\.com\/community\/marketplace\/templates\//i.test(href);
+      /framer\.com\/community\/marketplace\/templates\//i.test(href) ||
+      /^https?:\/\/framer\.link\//i.test(href);
   });
   if (anchors.length === 0) return null;
 
