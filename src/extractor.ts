@@ -1015,6 +1015,33 @@ async function rewriteJsFiles(outputDir: string, assetMap: AssetMap, baseOrigin:
         content = content.replace(new RegExp(escaped, 'g'), localPath);
       }
 
+      // The rewrite above just replaced remote absolute URLs with local
+      // paths (root-relative, e.g. `/assets/images/...`) wherever they
+      // appear textually in this file - including inside `new URL(x.src)`
+      // calls, which REQUIRE an absolute string when called with no second
+      // argument. Confirmed live: Framer's own runtime has exactly this
+      // call (an internal responsive-image srcset optimizer) built
+      // assuming its images are always served from an absolute CDN url;
+      // once local-pathed, it throws "Failed to construct 'URL': Invalid
+      // URL" inside a useMemo, which Framer's own error boundary catches
+      // silently and swaps the entire page's content for nothing - no
+      // console error, no crash dialog, just a blank page where the whole
+      // route used to render.
+      //
+      // Supplying a base is a safe fix regardless of which case actually
+      // applies at this call site: per the URL spec, a base argument is
+      // ignored whenever the first argument already parses as absolute, so
+      // this only ever changes behavior for the broken (relative) case.
+      // Applied to every `new URL(x.src)` call with no existing second
+      // argument, not just the one confirmed call site, since minification
+      // makes the exact function/variable names unpredictable across
+      // different Framer builds and this pattern is unambiguous regardless
+      // of naming.
+      content = content.replace(
+        /new URL\((\s*[$\w]+(?:\.[$\w]+)*\.src\s*)\)/g,
+        'new URL($1,location.origin)'
+      );
+
       const jsAssetEntry = Object.entries(assetMap).find(([, local]) => local && path.basename(local) === file);
       const jsRemoteUrl = jsAssetEntry ? jsAssetEntry[0] : null;
 
