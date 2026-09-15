@@ -121,6 +121,41 @@ export const astroStrategy: ExporterStrategy = {
 
       let html = '<!DOCTYPE html>\n' + $.html();
 
+      // Astro's template language treats a bare `{` in HTML body content as
+      // the start of a JS expression (same rule as JSX) -- so any captured
+      // page whose actual content happens to contain literal curly braces
+      // (a code sample shown as text, a "use the {variable} placeholder"
+      // sentence, anything like that) makes the Astro compiler try to parse
+      // whatever follows as JavaScript and fail with a bare "Unexpected
+      // token", pointing at some mid-page line that looks nothing like the
+      // real problem. Confirmed live: a Webflow template's own "how to
+      // integrate Lenis smooth scroll" documentation page, showing example
+      // init code (`new Lenis({...})`) as syntax-highlighted text, broke
+      // the whole build over one `{` in that displayed sample -- not
+      // anything specific to Lenis or that template, this hits any
+      // captured page with visible curly-brace content.
+      //
+      // Fixed by escaping to numeric HTML entities, which render
+      // identically in the browser and don't trip Astro's expression
+      // parser -- but done here as a string-level pass over the already-
+      // serialized HTML, split around <script>/<style> blocks (which,
+      // unlike arbitrary divs, never nest, so a non-greedy tag-to-matching-
+      // close-tag split is reliable). An earlier attempt escaped text nodes
+      // in the cheerio DOM directly, but cheerio's own serializer re-
+      // escapes the literal `&` that introduces each entity when it writes
+      // `$.html()`, turning `&#123;` into `&amp;#123;` -- which a browser
+      // renders as the literal text "&#123;", not "{". Those two tags carry
+      // real, unescaped JS/CSS (Astro treats their contents as raw via
+      // is:inline/is:global below), so escaping braces there would corrupt
+      // the very scripts/styles this format depends on.
+      html = html
+        .split(/(<script[^>]*>[\s\S]*?<\/script>|<style[^>]*>[\s\S]*?<\/style>)/i)
+        .map((segment) => {
+          if (/^<(script|style)/i.test(segment)) return segment;
+          return segment.replace(/{/g, '&#123;').replace(/}/g, '&#125;');
+        })
+        .join('');
+
       // Astro auto-scopes <style> and auto-bundles <script> tags by default
       // (rewriting selectors with a data-astro-cid-* attribute, splitting
       // scripts into separately-fetched ES modules). Both silently break
