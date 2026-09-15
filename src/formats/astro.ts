@@ -85,7 +85,13 @@ export const astroStrategy: ExporterStrategy = {
 
       // Framer's own attribution/telemetry chrome baked into every export.
       // Safe to remove outright — none of these get re-created by hydration.
+      // #__framer-editorbar-container is the floating "Edit Content" pencil
+      // trigger button — a separate element from the #__framer-editorbar
+      // iframe/panel it opens, confirmed missing from this list live (the
+      // panel was correctly gone, but the trigger button that opens it kept
+      // showing up bottom-right on every page).
       $('#__framer-editorbar').remove();
+      $('#__framer-editorbar-container').remove();
       $('#__framer-badge-container').remove();
       $('script[data-fid]').remove();
 
@@ -136,6 +142,7 @@ export const astroStrategy: ExporterStrategy = {
         promoClass ? `.${promoClass}` : null,
         '[data-framercommerce-widget]',
         '#__framer-editorbar',
+        '#__framer-editorbar-container',
         '#__framer-badge-container',
         '.w-webflow-badge',
       ].filter(Boolean) as string[];
