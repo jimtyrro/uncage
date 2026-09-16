@@ -194,6 +194,42 @@ export const astroStrategy: ExporterStrategy = {
         html = html.replace('<head>', '<head>' + guardScript);
       }
 
+      // GSAP-driven reveal animations (common in Webflow templates using
+      // ScrollTrigger/IntersectionObserver-style "fade+slide up" entrance
+      // effects) can get permanently stuck at their pre-reveal transform on
+      // content that starts inside a hidden container -- e.g. a second tab
+      // pane (display:none until clicked) whose items are never in the
+      // viewport at animation-setup time. Confirmed live on a Webflow
+      // template's "Sold" properties tab: the original site settles every
+      // item's inline style to plain `translate3d(0px, 0px, 0px)` once its
+      // reveal completes, but on the captured export, some items keep a
+      // leftover `translate(0%, -50%)` term permanently stacked in front of
+      // an otherwise-settled translate3d -- offsetting the element by half
+      // its own height and clipping its top out of view. Deterministic
+      // (same items every reload) and never self-corrects, even after a
+      // long wait or a manual ScrollTrigger.refresh() -- something about
+      // the export's load timing leaves those specific elements' reveal
+      // permanently short of its final step, and nothing here can fix
+      // Webflow's own bundled JS logic that got stuck.
+      //
+      // Patched with a narrowly-scoped runtime guard instead: watch for
+      // style-attribute mutations (GSAP rewrites `style` on every animation
+      // frame) and, the moment an element's inline style shows GSAP's own
+      // `translate: none; rotate: none; scale: none;` marker (the CSS
+      // Individual Transform Properties reset GSAP's CSSPlugin always
+      // writes when it controls an element -- never present on a plain
+      // CSS-authored transform, so this can't misfire on something like a
+      // legitimate `.w-lightbox-tall`-style centering trick) together with
+      // opacity:1 and a translate3d term already within 2px of zero (i.e.
+      // the reveal has clearly finished, bar this one leftover term), strip
+      // the stray percentage-based translate() and keep only the settled
+      // translate3d. Firing exactly when that condition first becomes true
+      // means a correctly-animating element is never touched mid-flight --
+      // by definition its transform only reaches that combination once,
+      // right when it would have settled on its own anyway.
+      const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
+      html = html.replace('<head>', '<head>' + stuckTransformGuard);
+
       const filePath = path.join(pagesDir, filename);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, html, 'utf-8');
