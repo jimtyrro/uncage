@@ -290,6 +290,24 @@ describe('Astro format: bake settled opacity for JS-controlled elements', () => 
     expect(astro).toContain('opacity: 0.1;');
   });
 
+  it('does NOT force opacity for a backdrop-filter load-transition curtain (bakery-co regression)', async () => {
+    // Real bug: a full-viewport backdrop-filter:blur(...) curtain was
+    // captured correctly already-settled at opacity:0 (its correct
+    // RESTING state -- unlike an entrance-reveal element, this fades OUT
+    // to reveal the page, so opacity:0 is where it's supposed to end up).
+    // Bare opacity:0 with no will-change is otherwise indistinguishable at
+    // the DOM level from a genuinely-stuck entrance-reveal, so
+    // backdrop-filter is the signal that separates them: it's a
+    // glassmorphism/veil effect, never meaningful on real page content.
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div data-framer-name="Overlay" style="backdrop-filter:blur(10px);background-color:rgba(255,255,255,0.2);-webkit-backdrop-filter:blur(10px);opacity: 0;">Hi</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('opacity: 0;');
+    expect(astro).not.toContain('opacity: 1;');
+  });
+
   it('does not disturb the transform on a baked element (left to runtime modules)', async () => {
     const html =
       '<!DOCTYPE html><html><head></head><body>' +

@@ -294,18 +294,38 @@ export const astroStrategy: ExporterStrategy = {
       // "Quick Links" section correctly caught despite an unrelated
       // "Menu"-named ancestor) or the near-1 tail of an animation mid-
       // settle at crawl time (opacity values like 0.989551, imperceptible
-      // either way). Elements at low-but-clearly-intentional opacity with
       // NEITHER signal -- e.g. arkitect's `.overlay`/`.desktop-overlay`
       // background tints, hand-authored at a stable 0.1/0.2, no
       // will-change, same value repeated identically every occurrence --
       // were correctly excluded; forcing those to opacity:1 would turn a
       // subtle tint into a solid block.
+      //
+      // One more exclusion, added after a real regression on bakery-co: a
+      // full-viewport `backdrop-filter: blur(...)` load-transition curtain
+      // was captured correctly already-settled at opacity:0 (its correct
+      // RESTING state -- it fades OUT to reveal the page, the opposite
+      // direction from an entrance-reveal element, which fades IN), and
+      // this pass forced it back to opacity:1, putting a permanent frosted
+      // veil over every page. It has neither will-change nor any other
+      // marker distinguishing it from a genuinely-stuck entrance-reveal at
+      // the DOM level -- both are bare `opacity:0` with no will-change --
+      // so the two cases need a different signal entirely. `backdrop-
+      // filter` is that signal: it's a glassmorphism/veil effect CSS
+      // property, applied to blur whatever renders BEHIND the element --
+      // never meaningful on the kind of element this pass exists to fix
+      // (real page content -- headings, images, sections -- has no reason
+      // to blur what's behind itself). Confirmed this doesn't shrink the
+      // arkitect fix's own coverage: re-inspected that element directly --
+      // it's a `position:fixed` dark circular shape (its own custom-cursor
+      // visual, unrelated to backdrop-filter) with no backdrop-filter
+      // anywhere in its style.
       $('[style]').each((_, el) => {
         const style = $(el).attr('style') || '';
         const m = style.match(/opacity:\s*([\d.]+)/);
         if (!m) return;
         const value = parseFloat(m[1]!);
         if (value >= 1) return;
+        if (style.includes('backdrop-filter')) return;
         const looksAnimated = value === 0 || style.includes('will-change');
         if (!looksAnimated) return;
         const updated = style.replace(/opacity:\s*([\d.]+)(;?)/, (full, _val: string, term: string) => `opacity: 1${term}`);
