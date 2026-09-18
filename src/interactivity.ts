@@ -14,9 +14,9 @@ import type * as cheerio from 'cheerio';
  * detection instead keys on the handful of markers that ARE stable:
  * `data-framer-cursor`, the `data-framer-components` library manifest
  * Framer itself emits, and `position: sticky` + JS-driven-transform
- * structural shape for the scroll-pin pattern. Extending coverage to a
- * template not yet seen is expected to mean adding a new marker here,
- * not rewriting the mechanism.
+ * structural shape for the scroll-pin/header-hide/orbit patterns.
+ * Extending coverage to a template not yet seen is expected to mean
+ * adding a new marker here, not rewriting the mechanism.
  */
 export type WidgetKind =
   | 'carousel'
@@ -25,7 +25,9 @@ export type WidgetKind =
   | 'custom-cursor'
   | 'entrance-reveal'
   | 'marquee'
-  | 'scroll-pin';
+  | 'scroll-pin'
+  | 'header-hide'
+  | 'orbit';
 
 export interface WidgetDetection {
   kind: WidgetKind;
@@ -189,6 +191,90 @@ export function detectWidgets($: cheerio.CheerioAPI, cssText = ''): WidgetDetect
     }
   }
   push('scroll-pin', scrollPinCount);
+
+  // --- header-hide -----------------------------------------------------
+  // A sticky nav/header (`position: sticky`, parsed the same way as
+  // scroll-pin, reusing stickyRuleRe) that carries `will-change:
+  // transform` on the STICKY ELEMENT ITSELF -- not a descendant, which is
+  // scroll-pin's signal instead. Confirmed live on dermato: the real site
+  // hides this header via a JS scroll listener that continuously writes
+  // a translateY onto exactly this element (direction-aware: hides
+  // scrolling down past a small threshold, reveals scrolling back up).
+  // `will-change: transform` on the container itself is the one marker
+  // of that JS control that survives the crawler's scroll-then-reset-to-
+  // 0 capture -- the actual translateY value doesn't (it's always back
+  // at "shown" once scroll resets to 0), which is exactly why this
+  // needs a real runtime replacement rather than baking the captured
+  // value: there's only ever one static value to bake, and it's the
+  // "shown" one, permanently. Confirmed NOT present on the three other
+  // real captures with sticky headers (arkitect, bakery-co, tripora) --
+  // a plain always-visible sticky header authored in pure CSS has no
+  // reason to declare `will-change: transform` on itself, so this stays
+  // a non-firing signal on sites that genuinely want the header to never
+  // hide. Scoped to containing (or being) a real <header>/<nav> landmark
+  // so it can't collide with some unrelated sticky+will-change element.
+  let headerHideCount = 0;
+  const stickyRuleRe2 = /([^{}]+)\{[^{}]*position:\s*sticky[^{}]*\}/gi;
+  for (const m of cssText.matchAll(stickyRuleRe2)) {
+    const selectorList = m[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const selector of selectorList) {
+      if (selector.startsWith('@')) continue;
+      let matches;
+      try {
+        matches = $(selector);
+      } catch {
+        continue;
+      }
+      matches.each((_, el) => {
+        const style = $(el).attr('style') || '';
+        if (!style.includes('will-change') || !/transform/i.test(style)) return;
+        const $el = $(el);
+        if (!$el.is('header, nav') && $el.find('header, nav').length === 0) return;
+        headerHideCount++;
+      });
+    }
+  }
+  push('header-hide', headerHideCount);
+
+  // --- orbit -----------------------------------------------------------
+  // A "wheel" of evenly-spaced badges/tags continuously rotating around
+  // a shared pivot (confirmed live: dermato's hero, 8 service-name
+  // badges arranged in a fan, each independently JS-updated every
+  // frame). Structurally distinct from entrance-reveal (opacity 0->1,
+  // fires once and stays) and marquee (translate, not rotate): this is a
+  // *rotation*-only, continuously-running animation with no natural
+  // "settled" static value to bake -- the crawler's scroll-then-reset
+  // capture just freezes whatever angle each badge happened to be at
+  // that instant, which is why only one badge ends up visible/legible
+  // without this widget. Detection: >=3 sibling elements, each
+  // individually carrying `will-change: transform` plus a *single*
+  // `rotate(Ndeg)` transform (nothing else mixed in), whose DOM-order
+  // angle deltas are consistent within a small tolerance -- the one
+  // structurally reliable signature of "evenly spaced around a wheel"
+  // that's unlikely to occur by coincidence on unrelated content.
+  let orbitCount = 0;
+  const rotateOnlyRe = /^rotate\(\s*(-?[\d.]+)deg\s*\)$/i;
+  $('*').each((_, el) => {
+    const kids = $(el).children().toArray();
+    if (kids.length < 3) return;
+    const angles: number[] = [];
+    for (const kid of kids) {
+      const style = $(kid).attr('style') || '';
+      if (!style.includes('will-change')) return;
+      const tm = style.match(/transform:\s*([^;]+)/i);
+      if (!tm) return;
+      const rm = tm[1]!.trim().match(rotateOnlyRe);
+      if (!rm) return;
+      angles.push(parseFloat(rm[1]!));
+    }
+    const deltas: number[] = [];
+    for (let i = 1; i < angles.length; i++) deltas.push(angles[i]! - angles[i - 1]!);
+    const avg = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+    if (Math.abs(avg) < 1) return; // near-zero spacing isn't a wheel, just coincidentally-similar angles
+    const consistent = deltas.every((d) => Math.abs(d - avg) < 3);
+    if (consistent) orbitCount++;
+  });
+  push('orbit', orbitCount);
 
   return out;
 }
