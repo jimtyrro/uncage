@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import * as cheerio from 'cheerio';
 import type { ExporterStrategy } from '../types.js';
 
@@ -86,6 +87,16 @@ export const astroStrategy: ExporterStrategy = {
 
     const pagesDir = path.join(outputDir, 'src', 'pages');
 
+    // --- Pass 1: per-page DOM cleanup + style-block extraction ------------
+    // Framer inlines every page's CSS as several <style> tags (60-78% of a
+    // captured page's bytes, confirmed by measurement) that are near-
+    // identical across pages -- one page's font-face block, SSR-minified
+    // component CSS, etc. are byte-for-byte the same as every other page's.
+    // Pulling them out here (before serializing to a per-page HTML string)
+    // and content-hashing across ALL pages lets identical blocks collapse
+    // to a single shared file instead of shipping full text on every page.
+    const perPage: Array<{ route: string; filename: string; $: cheerio.CheerioAPI; promoClass: string | null; styleTexts: string[] }> = [];
+
     for (const [route, htmlContent] of Object.entries(pages)) {
       const filename = routeToAstroFilename(route);
       const $ = cheerio.load(htmlContent);
@@ -118,6 +129,81 @@ export const astroStrategy: ExporterStrategy = {
       });
 
       const promoClass = detectPromoWidgetClass($);
+
+      // Pull <style> blocks out for cross-page extraction. Left in place
+      // (and handled by the existing is:global string-replace below) if
+      // empty — a handful of Framer's own <style data-framer-css> tags ship
+      // with zero content, not worth a file + import for nothing. Webflow
+      // captures, which already externalize almost all their CSS via
+      // <link>, naturally fall through this loop finding zero or
+      // near-nothing to extract — no special-case needed, the content-hash
+      // pipeline below is a no-op when there's nothing to hash.
+      const styleTexts: string[] = [];
+      $('style').each((_, el) => {
+        const text = $(el).text();
+        if (!text.trim()) return;
+        styleTexts.push(text);
+        $(el).remove();
+      });
+
+      perPage.push({ route, filename, $, promoClass, styleTexts });
+    }
+
+    // --- Pass 2: content-addressed dedup across all pages -----------------
+    // One file per distinct byte-for-byte CSS text, named by content hash
+    // (identical text anywhere becomes the identical file, regardless of
+    // which page or which ordinal <style> position it came from). Folder
+    // placement (global/shared/pages) is purely organizational — the
+    // per-page frontmatter import list below always follows that page's
+    // own original tag order, so cascade order is preserved per page even
+    // though a chunk shared by two pages might sit at different ordinal
+    // positions in each of them.
+    const styleFiles = new Map<string, { relPath: string; content: string }>(); // hash -> file
+    const hashOf = (text: string) => crypto.createHash('sha1').update(text).digest('hex').slice(0, 10);
+    const usageCount = new Map<string, number>(); // hash -> how many pages use it
+
+    for (const p of perPage) {
+      const seen = new Set<string>();
+      for (const text of p.styleTexts) {
+        const hash = hashOf(text);
+        if (seen.has(hash)) continue; // same page repeating the same block only counts once
+        seen.add(hash);
+        usageCount.set(hash, (usageCount.get(hash) || 0) + 1);
+        if (!styleFiles.has(hash)) styleFiles.set(hash, { relPath: '', content: text });
+      }
+    }
+
+    const totalPages = perPage.length;
+    const routeSlug = (route: string) => routeToAstroFilename(route).replace(/\.astro$/, '');
+    for (const [hash, file] of styleFiles) {
+      const count = usageCount.get(hash) || 0;
+      if (count === totalPages && totalPages > 1) {
+        file.relPath = `styles/global/${hash}.css`;
+      } else if (count >= 2) {
+        file.relPath = `styles/shared/${hash}.css`;
+      } else {
+        // Exactly one page uses it — file the page(s) that use it under.
+        const owner = perPage.find((p) => p.styleTexts.some((t) => hashOf(t) === hash));
+        const slug = owner ? routeSlug(owner.route) : 'misc';
+        file.relPath = `styles/pages/${slug}/${hash}.css`;
+      }
+    }
+
+    for (const file of styleFiles.values()) {
+      const fullPath = path.join(outputDir, 'src', file.relPath);
+      await fs.mkdir(path.dirname(fullPath), { recursive: true });
+      await fs.writeFile(fullPath, file.content, 'utf-8');
+    }
+    if (styleFiles.size > 0) {
+      const globalCount = [...styleFiles.values()].filter((f) => f.relPath.startsWith('styles/global/')).length;
+      const sharedCount = [...styleFiles.values()].filter((f) => f.relPath.startsWith('styles/shared/')).length;
+      const pageCount = styleFiles.size - globalCount - sharedCount;
+      console.log(`        Extracted ${styleFiles.size} CSS file(s): ${globalCount} global, ${sharedCount} shared, ${pageCount} page-specific`);
+    }
+
+    // --- Pass 3: finish each page -------------------------------------
+    for (const p of perPage) {
+      const { route, filename, $, promoClass, styleTexts } = p;
 
       let html = '<!DOCTYPE html>\n' + $.html();
 
@@ -163,7 +249,10 @@ export const astroStrategy: ExporterStrategy = {
       // (the scoping attribute doesn't land on every element the selectors
       // target), and script bundling turns synchronous inline bootstrap
       // scripts into deferred modules. is:global / is:inline disable both,
-      // shipping every tag exactly as captured.
+      // shipping every tag exactly as captured. Only applies to whatever
+      // <style> tags Pass 1 left in place (empty ones) — every non-empty
+      // block was already pulled out and replaced with a frontmatter
+      // import below.
       html = html.replace(/<style(?=[ >])/g, '<style is:global');
       html = html.replace(/<script(?=[ >])/g, '<script is:inline');
 
@@ -229,6 +318,20 @@ export const astroStrategy: ExporterStrategy = {
       // right when it would have settled on its own anyway.
       const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
       html = html.replace('<head>', '<head>' + stuckTransformGuard);
+
+      // Frontmatter imports for the CSS blocks Pass 1 pulled out of this
+      // page, in their ORIGINAL tag order (not grouped by scope) -- a page
+      // that had global, then shared, then page-specific CSS in that
+      // sequence gets imports in that same sequence, so Vite's cascade
+      // ordering matches what the browser originally saw. Frontmatter must
+      // be the very first thing in the file, before the <!DOCTYPE html>
+      // this format always emits.
+      if (styleTexts.length > 0) {
+        const depth = filename.split('/').length; // pages/<...>/<file>.astro -> steps back to src/
+        const upToSrc = '../'.repeat(depth);
+        const importLines = styleTexts.map((text) => `import '${upToSrc}${styleFiles.get(hashOf(text))!.relPath}';`);
+        html = `---\n${importLines.join('\n')}\n---\n${html}`;
+      }
 
       const filePath = path.join(pagesDir, filename);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
