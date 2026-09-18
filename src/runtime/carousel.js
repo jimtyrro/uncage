@@ -18,28 +18,49 @@
  * reimplementation for a low-frequency case.
  *
  * Two Webflow slider animation modes exist (root element's
- * data-animation attribute), and they need genuinely different runtime
- * mechanics, not just different CSS:
- *   - "slide" (default): slides sit side by side in a flex track: the
- *     mask viewport is fixed-width and the track slides underneath it.
- *     Handled below via mask.style.transform = translateX(...).
- *   - "cross" (crossfade): Webflow's own CSS already stacks every slide
- *     in the same position (no flex track, no translate needed at all);
- *     only the active slide's visibility/opacity differs. Confirmed live
- *     (tripora bug report): the captured, settled HTML already carries
- *     inline `visibility: hidden` on every non-active slide (baked in by
- *     the earlier "settle animation states" pass, matching Webflow's own
- *     crossfade resting state) -- driving this the "slide" way instead
- *     scrolled the mask to the right position but left the target slide
- *     still `visibility:hidden` underneath, rendering an empty gap.
- *     Fixed by branching: for "cross" sliders, never touch the mask's
- *     transform/display/flex at all, and instead toggle each slide's own
- *     visibility/opacity directly -- an instant swap, not a timed
- *     crossfade (Webflow's own smooth transition was driven by
- *     webflow.js's easing engine, which this runtime doesn't reproduce;
- *     an instant, correct swap is the safe baseline, matching this
- *     runtime's "functional replacement, not pixel-perfect animation
- *     reproduction" scope everywhere else).
+ * data-animation attribute), and both need the mask's flex-track
+ * transform -- the actual difference is a visibility/opacity layer on
+ * top, not a different positioning mechanism:
+ *   - "slide" (default): slides sit side by side in a flex track, the
+ *     mask viewport is fixed-width, and the track slides underneath it
+ *     via mask.style.transform = translateX(...). No visibility/opacity
+ *     toggling -- every slide stays visible, you just see whichever one
+ *     the transform currently scrolls into view.
+ *   - "cross" (crossfade): still the same flex track and the same
+ *     transform (confirmed live on tripora after an initial wrong
+ *     assumption -- see below), PLUS each slide's own visibility/opacity
+ *     toggled so only the active one shows.
+ *
+ * This took two real-data corrections to get right, both from tripora's
+ * `.location-slider` (data-animation="cross"):
+ *   1. Bare mask-transform alone (no branch at all) left the target
+ *      slide's own captured `visibility: hidden` in place (baked in by
+ *      the earlier "settle animation states" pass, matching Webflow's
+ *      own crossfade resting state) -- transform scrolled to the right
+ *      position, but the content there was still invisible.
+ *   2. The first fix for that assumed "cross" meant slides are
+ *      absolutely stacked in place (no flex track, no transform needed
+ *      at all) and skipped the transform/flex setup entirely for
+ *      "cross" sliders. Wrong: tripora's captured markup keeps "cross"
+ *      sliders in the exact same flex row as "slide" sliders --
+ *      confirmed live, mask.style.display stayed "flex" either way, and
+ *      each .w-slide is a normal flex item at its own row position, not
+ *      absolutely positioned. Skipping the transform left the
+ *      now-correctly-visible target slide sitting at its natural flex
+ *      offset, almost entirely outside the mask's overflow:hidden
+ *      viewport -- functionally still broken, just a different visible
+ *      symptom (a sliver of the wrong edge peeking in, worsening with
+ *      each click, instead of a blank gap).
+ *
+ * Both real bugs are fixed by treating "cross" as "slide" plus a
+ * visibility/opacity layer, not as a different positioning mechanism:
+ * flex/transform setup always runs, and only the crossfade-specific
+ * visibility/opacity toggle is conditional. The toggle is an instant
+ * swap, not a timed crossfade (Webflow's own smooth transition was
+ * driven by webflow.js's easing engine, which this runtime doesn't
+ * reproduce; an instant, correct swap is the safe baseline, matching
+ * this runtime's "functional replacement, not pixel-perfect animation
+ * reproduction" scope everywhere else).
  */
 (function () {
   'use strict';
@@ -60,14 +81,13 @@
     var rightArrow = root.querySelector('.w-slider-arrow-right');
 
     function render() {
+      mask.style.transform = 'translateX(' + -current * 100 + '%)';
       if (isCrossfade) {
         for (var c = 0; c < slides.length; c++) {
           var active = c === current;
           slides[c].style.visibility = active ? 'visible' : 'hidden';
           slides[c].style.opacity = active ? '1' : '0';
         }
-      } else {
-        mask.style.transform = 'translateX(' + -current * 100 + '%)';
       }
       for (var i = 0; i < dots.length; i++) {
         var dotActive = i === current;
@@ -93,11 +113,9 @@
       })(d);
     }
 
-    if (!isCrossfade) {
-      mask.style.display = 'flex';
-      for (var s = 0; s < slides.length; s++) {
-        slides[s].style.flex = '0 0 100%';
-      }
+    mask.style.display = 'flex';
+    for (var s = 0; s < slides.length; s++) {
+      slides[s].style.flex = '0 0 100%';
     }
     render();
   }
