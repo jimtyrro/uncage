@@ -113,6 +113,45 @@ export const astroStrategy: ExporterStrategy = {
       $('#__framer-badge-container').remove();
       $('script[data-fid]').remove();
 
+      // Framer emits relative hrefs (./, ../, ../../) for internal nav
+      // whose depth assumes a FLATTER routing model than Astro's actual
+      // static output produces. Astro serves each page as
+      // <route>/index.html, and every static file server this ends up
+      // deployed behind (confirmed live: nginx via the project's own
+      // Dockerfile) treats that as a real directory -- so a page's own
+      // effective URL depth is one level deeper than the relative math
+      // assumed when Framer originally generated these hrefs. Confirmed
+      // live on a real deployed build: clicking a footer "About" link
+      // (captured as href="../about") from a blog post page resolved to
+      // /blog/about, which doesn't exist, instead of /about -- broken
+      // navigation on every internal link on every page nested more than
+      // one level deep (any blog post, any project/work page).
+      //
+      // Fixed by resolving each relative href against this page's own
+      // route treated as a FILE, not a directory (i.e. no trailing slash
+      // on the base) -- confirmed live this exactly cancels out the extra
+      // directory-index level a real static file server adds, matching
+      // Framer's original assumption. Verified against every real
+      // relative href pattern observed on arkitect (./, ../, ../../,
+      // ../about, ../work/wave-house, ./category/design) -- all resolve
+      // to the correct absolute destination this way.
+      //
+      // Scoped to hrefs starting with `.` specifically so this never
+      // touches absolute paths, external URLs, or special schemes
+      // (mailto:, tel:, #anchor) -- and is a no-op on Webflow captures,
+      // confirmed live to already emit absolute paths with no relative
+      // hrefs at all.
+      $('a[href^="."]').each((_, el) => {
+        const href = $(el).attr('href')!;
+        try {
+          const resolved = new URL(href, 'https://uncage.invalid' + route).pathname;
+          $(el).attr('href', resolved);
+        } catch {
+          // Malformed href -- leave it as captured rather than crash the
+          // whole compile over one bad link.
+        }
+      });
+
       // Same stale-SRI-hash bug as html.ts: integrity is computed against
       // the original remote file's bytes, not our local capture - once
       // href/src is rewritten, the browser silently drops the resource
