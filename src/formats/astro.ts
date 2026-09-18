@@ -205,6 +205,58 @@ export const astroStrategy: ExporterStrategy = {
     for (const p of perPage) {
       const { route, filename, $, promoClass, styleTexts } = p;
 
+      // Step 2 of the broader "drop hydration" plan: bake the settled,
+      // fully-revealed state into the static markup itself, rather than
+      // relying on Framer/Webflow's own JS to un-hide it after load. Scope
+      // is deliberately narrow here -- opacity only, not transform. Opacity
+      // on a JS-controlled element is unambiguous: it always means
+      // "revealed vs. still hidden," never a legitimate permanent design
+      // choice (a real semi-transparent overlay is styled via a CSS rule).
+      // Transform is genuinely ambiguous on the same elements -- it can
+      // mean "hasn't slid into place yet" (safe to zero out) or "mid-way
+      // through a deliberate, ongoing scroll-linked effect" (zeroing it
+      // would be wrong) -- so that gets resolved per-widget by the
+      // runtime modules being added alongside this, not guessed at here.
+      //
+      // Detection is NOT scoped to GSAP's `translate: none` signature --
+      // checked against real captures (arkitect, dermato, bakery-co) and
+      // found zero matches for it there. GSAP is a Webflow-template
+      // pattern; Framer's own component runtime (Framer Motion) writes a
+      // structurally different inline style with no shared marker, and it
+      // was exactly the element responsible for arkitect's dark-screen
+      // bug (a full-screen page-transition overlay frozen at opacity:0)
+      // that the GSAP-only version of this check missed entirely.
+      //
+      // Instead: target inline `opacity` that is either (a) exactly 0, or
+      // (b) partial AND accompanied by `will-change` in the same style
+      // attribute (a CSS hint browsers only get when JS is about to
+      // animate that property -- never present on authored CSS). Verified
+      // against 589 real inline-opacity<1 elements across the three local
+      // Framer captures before committing to this shape: elements matching
+      // (a) or (b) were, on manual sampling, uniformly Framer's own
+      // entrance-reveal pattern (`will-change:transform;opacity:0;
+      // transform:translateY(...) scale(...)`, including a genuine footer
+      // "Quick Links" section correctly caught despite an unrelated
+      // "Menu"-named ancestor) or the near-1 tail of an animation mid-
+      // settle at crawl time (opacity values like 0.989551, imperceptible
+      // either way). Elements at low-but-clearly-intentional opacity with
+      // NEITHER signal -- e.g. arkitect's `.overlay`/`.desktop-overlay`
+      // background tints, hand-authored at a stable 0.1/0.2, no
+      // will-change, same value repeated identically every occurrence --
+      // were correctly excluded; forcing those to opacity:1 would turn a
+      // subtle tint into a solid block.
+      $('[style]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        const m = style.match(/opacity:\s*([\d.]+)/);
+        if (!m) return;
+        const value = parseFloat(m[1]!);
+        if (value >= 1) return;
+        const looksAnimated = value === 0 || style.includes('will-change');
+        if (!looksAnimated) return;
+        const updated = style.replace(/opacity:\s*([\d.]+)(;?)/, (full, _val: string, term: string) => `opacity: 1${term}`);
+        if (updated !== style) $(el).attr('style', updated);
+      });
+
       let html = '<!DOCTYPE html>\n' + $.html();
 
       // Astro's template language treats a bare `{` in HTML body content as

@@ -230,3 +230,73 @@ describe('Astro format: cross-page CSS extraction', () => {
     expect(files).toHaveLength(0);
   });
 });
+
+describe('Astro format: bake settled opacity for JS-controlled elements', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compileOnePage(html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-opacity-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+  }
+
+  it('forces opacity to 1 when exactly 0 (Framer Motion signature, not GSAP)', async () => {
+    // Reproduces the real arkitect dark-screen bug verbatim: a full-screen
+    // page-transition overlay, frozen at opacity:0 -- Framer Motion's own
+    // inline-style shape, not GSAP's (no `translate: none` marker at all).
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div style="background-color: rgb(32, 37, 39); position: fixed; top: 0px; left: 0px; z-index: 13; opacity: 0; transform: translate(-50%, 0%);">Hi</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('opacity: 1;');
+    expect(astro).not.toContain('opacity: 0;');
+  });
+
+  it('forces opacity to 1 when partial AND will-change is present (entrance-reveal pattern)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div style="will-change:transform;opacity:0.7284;transform:translateY(80px) scale(0.9)">Hi</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('opacity: 1');
+    expect(astro).not.toContain('opacity:0.7284');
+  });
+
+  it('leaves opacity alone when already 1', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div style="will-change: transform; opacity: 1;">Hi</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('opacity: 1;');
+  });
+
+  it('does NOT touch partial opacity without will-change (legitimate design tint)', async () => {
+    // Reproduces arkitect's real `.overlay`/`.desktop-overlay` elements:
+    // a stable, hand-authored 0.1-0.2 background tint with no will-change
+    // and no reveal-style transform -- forcing this to opacity:1 would
+    // turn a subtle tint into a solid block.
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="overlay" style="background-color: rgb(24, 33, 45); opacity: 0.1;">Overlay</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('opacity: 0.1;');
+  });
+
+  it('does not disturb the transform on a baked element (left to runtime modules)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div style="will-change:transform;opacity:0;transform:translateY(80px) scale(0.9)">Hi</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('transform:translateY(80px) scale(0.9)');
+    expect(astro).toContain('opacity: 1');
+  });
+});
