@@ -444,8 +444,24 @@ export const astroStrategy: ExporterStrategy = {
       // src="...">`. Everything else (react, framer's own runtime,
       // motion, every component chunk) loads via that one entry point's
       // own internal dynamic imports, never as separate <script> tags in
-      // the captured HTML -- removing this one tag is sufficient.
+      // the captured HTML -- removing this one tag is sufficient to stop
+      // it EXECUTING.
+      //
+      // Not sufficient to stop the browser FETCHING those chunks, though
+      // -- confirmed live: removing only the <script> tag still triggered
+      // ~33 JS requests (react, framer, motion, every component chunk),
+      // because Framer's Vite-family bundler also emits one
+      // <link rel="modulepreload" href="..."> per chunk, and the browser
+      // honors that fetch HINT independently of whether the module it
+      // points at is ever actually imported/executed. modulepreload only
+      // has meaning for `type="module"` scripts, which is exclusively how
+      // Framer's bundle is typed -- Webflow's plain
+      // `type="text/javascript"` scripts never use it, confirmed across
+      // every Webflow capture this was checked against, so stripping this
+      // unconditionally (not gated on the Framer-specific branch above)
+      // is safe for both platforms.
       html = html.replace(/<script[^>]*\bdata-framer-bundle="main"[^>]*><\/script>/gi, '');
+      html = html.replace(/<link[^>]*\srel="modulepreload"[^>]*>/gi, '');
 
       // Webflow: no equivalent marker exists (confirmed live: every
       // <script> tag on a real Webflow capture carries nothing but

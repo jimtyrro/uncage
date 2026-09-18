@@ -384,6 +384,26 @@ describe('Astro format: strip Framer/Webflow hydration JS', () => {
     expect(astro).not.toContain('data-framer-bundle');
   });
 
+  it('removes modulepreload hints -- the script tag alone is not enough', async () => {
+    // Confirmed live on a real re-crawl of arkitect: removing only the
+    // <script data-framer-bundle> tag still triggered ~33 JS requests in
+    // a real browser (react, framer, motion, every component chunk),
+    // because Framer's Vite-family bundler also emits one
+    // <link rel="modulepreload"> per chunk, and browsers honor that
+    // fetch hint independently of whether the <script> that would have
+    // imported it still exists.
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline type="module" async data-framer-bundle="main" src="/assets/js/script_main.js"></script>' +
+      '<link rel="modulepreload" fetchpriority="low" href="/assets/js/react.BvLYqtUI-a0c5ac99.js">' +
+      '<link rel="modulepreload" fetchpriority="low" href="/assets/js/motion.BauDcWPd-6cbf5fb3.js">' +
+      '</head><body><p>Hi</p></body></html>';
+    const astro = await compilePage(html);
+    expect(astro).not.toContain('modulepreload');
+    expect(astro).not.toContain('react.BvLYqtUI');
+    expect(astro).not.toContain('motion.BauDcWPd');
+  });
+
   it('removes Webflow\'s core webflow.schunk.*.js and webflow.<hash>.*.js bundles', async () => {
     const html =
       '<!DOCTYPE html><html><head>' +
