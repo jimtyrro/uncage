@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
+import postcss from 'postcss';
 import type { ExporterStrategy } from '../types.js';
 import { detectWidgets, type WidgetKind } from '../interactivity.js';
 
@@ -83,6 +84,35 @@ function detectPromoWidgetClass($: cheerio.CheerioAPI): string | null {
   if (isLayoutRoot($, target)) return null;
   const classAttr = $(target as any).attr('class') || '';
   return classAttr.split(/\s+/).filter(Boolean)[0] || null;
+}
+
+/**
+ * Every class name referenced by any selector in a chunk of CSS text.
+ * Used to detect elements whose styling was never captured at all (see
+ * the orphaned-image safety net below) -- deliberately permissive: any
+ * rule mentioning `.foo` anywhere in its selector (however compound --
+ * `.foo.bar`, `.parent .foo:hover`, `.foo > .bar`) counts `foo` as
+ * "known", since the goal is only to rule out genuinely orphaned
+ * classes, not to model full selector specificity.
+ */
+function collectKnownClassSelectors(cssText: string): Set<string> {
+  const known = new Set<string>();
+  try {
+    const root = postcss.parse(cssText);
+    root.walkRules((rule) => {
+      const classMatches = rule.selector.match(/\.[a-zA-Z_-][\w-]*/g);
+      if (classMatches) {
+        for (const c of classMatches) known.add(c.slice(1));
+      }
+    });
+  } catch {
+    // Malformed/partial CSS text (rare, but real captures do occasionally
+    // include a broken fragment) shouldn't crash the whole compile --
+    // worst case this under-populates the known-class set, which only
+    // makes the orphan check MORE conservative (more false "orphans"),
+    // never less safe.
+  }
+  return known;
 }
 
 export const astroStrategy: ExporterStrategy = {
@@ -330,6 +360,57 @@ export const astroStrategy: ExporterStrategy = {
         if (!looksAnimated) return;
         const updated = style.replace(/opacity:\s*([\d.]+)(;?)/, (full, _val: string, term: string) => `opacity: 1${term}`);
         if (updated !== style) $(el).attr('style', updated);
+      });
+
+      // Safety net for a different, harder problem than the opacity pass
+      // above: a bespoke code component (confirmed live on dermato -- a
+      // Framer "before/after" image-comparison widget) that styles itself
+      // via CSS-in-JS (Emotion, Framer's own documented approach for
+      // custom code components) injected at hydration time -- a mechanism
+      // no static crawler can see into, so its hash-named classes
+      // (`css-xxxxxxx`, unique per project -- not a hardcodable selector,
+      // there is nothing stable to target) ship with literally zero
+      // matching CSS anywhere in the export. Confirmed the observed
+      // failure mode live: an orphaned <img> renders at its raw file
+      // dimensions (1440x1920) instead of being sized to its card, and
+      // since it's position:static that height counts in normal document
+      // flow, ballooning the containing section by ~3300px and breaking
+      // the whole page layout below the fold.
+      //
+      // Not attempting to reconstruct the widget's actual behavior (the
+      // crop/reveal effect is genuinely unrecoverable, same "opaque,
+      // proprietary" category as custom-cursor's hash case) -- only
+      // preventing the catastrophic layout overflow. Any <img> whose
+      // classes match zero known selectors anywhere in this page's own
+      // extracted CSS or the site-wide external CSS (i.e. definitely lost
+      // its styling, not just a class this particular page doesn't use)
+      // gets the standard, safe web default for an unconstrained image:
+      // max-width:100%; height:auto. That degrades the fancy comparison
+      // effect (the two images may stack or overlap oddly instead of
+      // clipping) but keeps it within its natural container width instead
+      // of blowing out the page -- a real design compromise, not a fix
+      // for the widget itself.
+      //
+      // Scoped narrowly to reduce false positives: only <img> tags (not
+      // arbitrary elements -- unstyled non-replaced elements don't have
+      // an intrinsic size to overflow with), only when the class attribute
+      // is present and non-empty (a classless image is a different,
+      // plausibly-intentional case, not "styling was lost"), and skipped
+      // entirely if the element already has an explicit width/height
+      // attribute or inline size constraint (don't override an image that
+      // already has real sizing information, orphaned class or not).
+      const knownClasses = collectKnownClassSelectors(externalCss + styleTexts.join('\n'));
+      $('img').each((_, el) => {
+        const classAttr = $(el).attr('class');
+        if (!classAttr) return;
+        const classes = classAttr.split(/\s+/).filter(Boolean);
+        if (classes.length === 0) return;
+        if (classes.some((c) => knownClasses.has(c))) return;
+        if ($(el).attr('width') || $(el).attr('height')) return;
+        const style = $(el).attr('style') || '';
+        if (/\b(width|height|max-width|max-height)\s*:/i.test(style)) return;
+        const updated = (style && !style.trim().endsWith(';') ? style + '; ' : style) + 'max-width: 100%; height: auto;';
+        $(el).attr('style', updated);
       });
 
       let html = '<!DOCTYPE html>\n' + $.html();

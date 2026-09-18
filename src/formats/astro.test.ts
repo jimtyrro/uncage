@@ -319,6 +319,74 @@ describe('Astro format: bake settled opacity for JS-controlled elements', () => 
   });
 });
 
+describe('Astro format: orphaned-image safety net (lost CSS-in-JS/hydration styling)', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compileOnePage(html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-orphan-img-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+  }
+
+  it('constrains an <img> whose class matches zero known CSS (dermato regression)', async () => {
+    // Reproduces the real dermato bug verbatim: a Framer "before/after"
+    // code component styled via Emotion CSS-in-JS injected at hydration
+    // time -- a mechanism the static crawler can't see into, so its
+    // hash-named class ships with zero matching CSS anywhere. Left alone,
+    // the image renders at its raw file dimensions (1440x1920) and, being
+    // position:static, that height counts in normal document flow,
+    // ballooning the containing section by thousands of pixels.
+    const html =
+      '<!DOCTYPE html><html><head><style>.some-other-class { color: red; }</style></head><body>' +
+      '<img src="/assets/images/photo.avif" class="css-rs75p9" alt="">' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('max-width: 100%; height: auto;');
+  });
+
+  it('leaves an <img> alone when its class has a matching CSS rule', async () => {
+    const html =
+      '<!DOCTYPE html><html><head><style>.hero-photo { width: 400px; }</style></head><body>' +
+      '<img src="/assets/images/photo.avif" class="hero-photo" alt="">' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).not.toContain('max-width: 100%; height: auto;');
+  });
+
+  it('leaves a classless <img> alone (not the failure pattern this targets)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<img src="/assets/images/photo.avif" alt="">' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).not.toContain('max-width: 100%; height: auto;');
+  });
+
+  it('leaves an orphaned <img> alone when it already has explicit sizing', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<img src="/assets/images/photo.avif" class="css-rs75p9" width="400" height="300" alt="">' +
+      '<img src="/assets/images/photo2.avif" class="css-other" style="width: 200px;" alt="">' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).not.toContain('max-width: 100%; height: auto;');
+  });
+
+  it('matches a class referenced by any compound selector, not just a bare .class rule', async () => {
+    const html =
+      '<!DOCTYPE html><html><head><style>.card:hover .thumb { opacity: 0.8; }</style></head><body>' +
+      '<img src="/assets/images/photo.avif" class="thumb" alt="">' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).not.toContain('max-width: 100%; height: auto;');
+  });
+});
+
 describe('Astro format: uncage-runtime widget injection', () => {
   const tmpDirs: string[] = [];
 
