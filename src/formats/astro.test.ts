@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { astroStrategy } from './astro.js';
+import { astroStrategy, routeToAstroFilename } from './astro.js';
 
 describe('Astro format: curly-brace escaping in text content', () => {
   const tmpDirs: string[] = [];
@@ -384,6 +384,72 @@ describe('Astro format: orphaned-image safety net (lost CSS-in-JS/hydration styl
       '</body></html>';
     const astro = await compileOnePage(html);
     expect(astro).not.toContain('max-width: 100%; height: auto;');
+  });
+});
+
+describe('Astro format: resolves Framer relative hrefs to absolute paths', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compilePageAtRoute(route: string, html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-href-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { [route]: html });
+    const filename = routeToAstroFilename(route);
+    return fs.readFile(path.join(outputDir, 'src', 'pages', filename), 'utf-8');
+  }
+
+  it('resolves ../about from a one-level-nested page to /about, not /blog/about (real arkitect bug)', async () => {
+    // Reproduces the real, confirmed-live navigation bug verbatim: Framer
+    // captures relative hrefs assuming a flatter routing model than
+    // Astro's actual <route>/index.html static output, so a naive
+    // directory-style relative resolution (what a real deployed static
+    // file server does) sends this link to the wrong destination.
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<a href="../about">About</a>' +
+      '</body></html>';
+    const astro = await compilePageAtRoute('/blog/some-post', html);
+    expect(astro).toContain('href="/about"');
+    expect(astro).not.toContain('href="../about"');
+  });
+
+  it('resolves ../../ from a two-level-nested page to the site root', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<a href="../../">Home</a>' +
+      '</body></html>';
+    const astro = await compilePageAtRoute('/blog/category/architecture', html);
+    expect(astro).toContain('href="/"');
+  });
+
+  it('resolves a same-level ./ reference relative to its own section, not the site root', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<a href="./category/design">Design</a>' +
+      '</body></html>';
+    const astro = await compilePageAtRoute('/blog/some-post', html);
+    expect(astro).toContain('href="/blog/category/design"');
+  });
+
+  it('leaves absolute paths, external URLs, and special schemes untouched', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<a href="/about">About</a>' +
+      '<a href="https://example.com/">External</a>' +
+      '<a href="mailto:hello@example.com">Email</a>' +
+      '<a href="tel:+1234567890">Call</a>' +
+      '<a href="#section">Anchor</a>' +
+      '</body></html>';
+    const astro = await compilePageAtRoute('/blog/some-post', html);
+    expect(astro).toContain('href="/about"');
+    expect(astro).toContain('href="https://example.com/"');
+    expect(astro).toContain('href="mailto:hello@example.com"');
+    expect(astro).toContain('href="tel:+1234567890"');
+    expect(astro).toContain('href="#section"');
   });
 });
 
