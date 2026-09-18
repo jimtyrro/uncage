@@ -53,6 +53,7 @@
     "cheerio": "^1.2.0",
     "commander": "^15.0.0",
     "cssnano": "^8.0.8",
+    "js-beautify": "^2.0.3",
     "playwright": "^1.62.1",
     "playwright-extra": "^4.3.6",
     "postcss": "^8.5.26",
@@ -63,6 +64,7 @@
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
+    "@types/js-beautify": "^1.14.3",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^4.1.11",
     "ts-node": "^10.9.2",

@@ -393,6 +393,68 @@ describe('Astro format: orphaned-image safety net (lost CSS-in-JS/hydration styl
   });
 });
 
+describe('Astro format: pretty-prints output instead of one dense line', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compileOnePage(html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-pretty-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+  }
+
+  it('breaks nested block elements across multiple indented lines', async () => {
+    const html = '<!DOCTYPE html><html><head></head><body><div><section><p>Hi</p></section></div></body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro.split('\n').length).toBeGreaterThan(3);
+    expect(astro).toMatch(/<div>\s*\n\s*<section>/);
+  });
+
+  it('does not introduce whitespace between adjacent inline elements with none originally', async () => {
+    // The real regression risk: a generic HTML formatter inserting
+    // rendering-visible whitespace between elements that were
+    // deliberately butted together (e.g. a price + currency symbol).
+    const html = '<!DOCTYPE html><html><head></head><body><p>Price:<span class="currency">$</span><span class="amount">99</span></p></body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('Price:<span class="currency">$</span><span class="amount">99</span>');
+  });
+
+  it('preserves meaningful spacing around an inline link', async () => {
+    const html = '<!DOCTYPE html><html><head></head><body><p>Click <a href="/x">here</a> to continue.</p></body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('Click <a href="/x">here</a> to continue.');
+  });
+
+  it('does not reformat the contents of an is:inline script (regex/nested-function risk)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<script>(function(){var re=/style\\*="translate: none"/;if(re.test("x")){console.log("y")}})();</script>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('var re=/style\\*="translate: none"/;if(re.test("x")){console.log("y")}');
+  });
+
+  it('keeps already-escaped curly-brace entities intact, not re-decoded', async () => {
+    const html = '<!DOCTYPE html><html><head></head><body><p>new Lenis({smooth: true})</p></body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro).toContain('new Lenis(&#123;smooth: true&#125;)');
+  });
+
+  it('preserves the frontmatter block exactly, unformatted', async () => {
+    const html =
+      '<!DOCTYPE html><html><head><style>.a{color:red}</style></head><body><p>Hi</p></body></html>';
+    const astro = await compileOnePage(html);
+    expect(astro.startsWith('---\n')).toBe(true);
+    const frontmatterEnd = astro.indexOf('---', 4);
+    const frontmatter = astro.slice(0, frontmatterEnd + 3);
+    expect(frontmatter).toMatch(/^---\nimport '\.\.\/styles\/pages\/test\/[a-f0-9]+\.css';\n---$/);
+  });
+});
+
 describe('Astro format: resolves Framer relative hrefs to absolute paths', () => {
   const tmpDirs: string[] = [];
 

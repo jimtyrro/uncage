@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
 import postcss from 'postcss';
+import beautifyHtml from 'js-beautify';
 import type { ExporterStrategy } from '../types.js';
 import { detectWidgets, type WidgetKind } from '../interactivity.js';
 import {
@@ -171,6 +172,52 @@ function escapeCurlyBraces(html: string): string {
       return segment.replace(/{/g, '&#123;').replace(/}/g, '&#125;');
     })
     .join('');
+}
+
+/**
+ * Every generated .astro file up to this point is a single dense line
+ * per page (or per component) -- correct, but unreadable and hard to
+ * diff, regardless of how well componentized the underlying structure
+ * now is. Reformats using js-beautify's HTML mode rather than hand-
+ * rolled indentation logic: real-tested this against the specific risk
+ * cases that matter here --
+ *   - adjacent inline elements with no original whitespace between them
+ *     (`<span>$</span><span>99</span>`) and text with meaningful spacing
+ *     around an inline link (`Click <a href="/x">here</a> to continue.`)
+ *     both come back byte-identical, confirming it doesn't touch
+ *     rendering-significant whitespace.
+ *   - already-escaped &#123;/&#125; entities (see escapeCurlyBraces
+ *     above) survive untouched, not re-decoded.
+ *   - Astro's own `<Layout ...>`/`<ComponentName ... />` tags and
+ *     `{expression}` syntax this tool generates pass through safely --
+ *     confirmed with a real Astro build that a `{description &&\n  <meta
+ *     .../>}` conditional split across lines by the formatter (its
+ *     default behavior around `&&`) still compiles and renders
+ *     correctly; JS expressions are allowed to span lines, and so is
+ *     Astro's specific parsing of a {} block.
+ *
+ * The identity `js`/`css` formatter functions passed as the 3rd/4th
+ * arguments are the one non-default setting this relies on -- without
+ * them, js-beautify's HTML mode also reformats the CONTENTS of every
+ * <script>/<style> tag using its own JS/CSS beautifiers, which is a real
+ * risk for the guard scripts this tool injects (regex literals, nested
+ * functions -- exactly the kind of code a generic JS reformatter can
+ * have edge cases on) for no readability benefit that matters (this
+ * tool's own generated scripts are already reasonably formatted source,
+ * and a captured page's original inline scripts are vendor output this
+ * tool doesn't want to risk altering the behavior of by reformatting).
+ */
+function prettyPrintAstro(source: string): string {
+  const identity = (s: string) => s;
+  // @types/js-beautify only declares the 2-arg (text, options) form of
+  // `html`, but the real runtime implementation (verified directly
+  // against the installed package) is `style_html(html_source, options,
+  // js, css)` -- the 3rd/4th positional args this depends on to disable
+  // script/style content reformatting. Narrow, local cast rather than
+  // widening this function's own signature or reaching for a broader
+  // `any`.
+  const htmlBeautify = beautifyHtml.html as unknown as (text: string, options: object, js: (s: string) => string, css: (s: string) => string) => string;
+  return htmlBeautify(source, { indent_size: 2, wrap_line_length: 0, preserve_newlines: true }, identity, identity);
 }
 
 export const astroStrategy: ExporterStrategy = {
@@ -747,7 +794,7 @@ export const astroStrategy: ExporterStrategy = {
       const layoutDir = path.join(outputDir, 'src', 'layouts');
       await fs.mkdir(layoutDir, { recursive: true });
       const escapedHeadResult = { ...headResult, boilerplate: headResult.boilerplate !== null ? escapeCurlyBraces(headResult.boilerplate) : null };
-      await fs.writeFile(path.join(layoutDir, 'Layout.astro'), buildLayoutFile(escapedHeadResult), 'utf-8');
+      await fs.writeFile(path.join(layoutDir, 'Layout.astro'), prettyPrintAstro(buildLayoutFile(escapedHeadResult)), 'utf-8');
       console.log('        Generated src/layouts/Layout.astro');
     }
 
@@ -764,7 +811,7 @@ export const astroStrategy: ExporterStrategy = {
         const needsProp = templated !== escaped;
         componentNeedsCurrentPath.set(comp.name, needsProp);
         const content = needsProp ? `---\nconst { currentPath } = Astro.props;\n---\n${templated}\n` : `${templated}\n`;
-        await fs.writeFile(path.join(componentsDir, `${comp.name}.astro`), content, 'utf-8');
+        await fs.writeFile(path.join(componentsDir, `${comp.name}.astro`), prettyPrintAstro(content), 'utf-8');
       }
       console.log(`        Extracted ${bodyComponents.length} shared component(s): ${bodyComponents.map((c) => c.name).join(', ')}`);
     }
@@ -843,7 +890,7 @@ export const astroStrategy: ExporterStrategy = {
 
       const filePath = path.join(pagesDir, filename);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, finalHtml, 'utf-8');
+      await fs.writeFile(filePath, prettyPrintAstro(finalHtml), 'utf-8');
       console.log(`        Generated src/pages/${filename}`);
     }
   },
