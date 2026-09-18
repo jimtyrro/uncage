@@ -412,3 +412,69 @@ export function templateActiveLinks(html: string): string {
     return out;
   });
 }
+
+// ---------------------------------------------------------------------------
+// File generation: Layout.astro content from the extraction results above
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the full content of src/layouts/Layout.astro from a
+ * computeHeadBoilerplate result: the shared boilerplate verbatim, plus
+ * the known SEO/meta tags re-inserted as prop-driven expressions (Astro's
+ * `{value && <tag .../>}` conditional-render syntax skips the tag
+ * entirely when a page didn't have that particular one, e.g. no og:image
+ * -- rather than always emitting an empty attribute). Their exact
+ * original interleaved position within <head> is lost once
+ * extractMetaProps pulls them out for capture (order among these tags
+ * never affects anything a browser or crawler cares about, so this
+ * doesn't try to preserve it) -- appended together right before
+ * </head>, with a `<slot name="head-extra" />` after them for the rare
+ * page that had head content the majority-vote boilerplate didn't
+ * recognize as shared (computeHeadBoilerplate's perPageExtra).
+ */
+export function buildLayoutFile(headResult: HeadBoilerplateResult): string {
+  const boilerplate = headResult.boilerplate ?? '';
+  return `---
+export interface Props {
+  title: string;
+  description?: string | null;
+  canonical?: string | null;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogUrl?: string | null;
+  ogImage?: string | null;
+  twitterTitle?: string | null;
+  twitterDescription?: string | null;
+}
+const {
+  title,
+  description = null,
+  canonical = null,
+  ogTitle = null,
+  ogDescription = null,
+  ogUrl = null,
+  ogImage = null,
+  twitterTitle = null,
+  twitterDescription = null,
+} = Astro.props as Props;
+---
+<html${headResult.htmlAttrs}>
+<head>
+${boilerplate}
+<title>{title}</title>
+{description && <meta name="description" content={description}>}
+{canonical && <link rel="canonical" href={canonical}>}
+{ogTitle && <meta property="og:title" content={ogTitle}>}
+{ogDescription && <meta property="og:description" content={ogDescription}>}
+{ogUrl && <meta property="og:url" content={ogUrl}>}
+{ogImage && <meta property="og:image" content={ogImage}>}
+{twitterTitle && <meta name="twitter:title" content={twitterTitle}>}
+{twitterDescription && <meta name="twitter:description" content={twitterDescription}>}
+<slot name="head-extra" />
+</head>
+<body>
+<slot />
+</body>
+</html>
+`;
+}

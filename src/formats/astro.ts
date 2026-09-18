@@ -6,6 +6,13 @@ import * as cheerio from 'cheerio';
 import postcss from 'postcss';
 import type { ExporterStrategy } from '../types.js';
 import { detectWidgets, type WidgetKind } from '../interactivity.js';
+import {
+  extractMetaProps,
+  computeHeadBoilerplate,
+  findSharedBodyComponents,
+  templateActiveLinks,
+  buildLayoutFile,
+} from '../componentize.js';
 
 // Resolved relative to this file's own location (not process.cwd(), which
 // depends on where the CLI happened to be invoked from) so the vanilla-JS
@@ -113,6 +120,57 @@ function collectKnownClassSelectors(cssText: string): Set<string> {
     // never less safe.
   }
   return known;
+}
+
+/**
+ * Astro's template language treats a bare `{` in HTML body content as the
+ * start of a JS expression (same rule as JSX) -- so any captured page
+ * whose actual content happens to contain literal curly braces (a code
+ * sample shown as text, a "use the {variable} placeholder" sentence,
+ * anything like that) makes the Astro compiler try to parse whatever
+ * follows as JavaScript and fail with a bare "Unexpected token", pointing
+ * at some mid-page line that looks nothing like the real problem.
+ * Confirmed live: a Webflow template's own "how to integrate Lenis smooth
+ * scroll" documentation page, showing example init code
+ * (`new Lenis({...})`) as syntax-highlighted text, broke the whole build
+ * over one `{` in that displayed sample -- not anything specific to
+ * Lenis or that template, this hits any captured page with visible
+ * curly-brace content.
+ *
+ * Fixed by escaping to numeric HTML entities, which render identically
+ * in the browser and don't trip Astro's expression parser -- but done as
+ * a string-level pass, split around <script>/<style> blocks (which,
+ * unlike arbitrary divs, never nest, so a non-greedy tag-to-matching-
+ * close-tag split is reliable). An earlier attempt escaped text nodes in
+ * the cheerio DOM directly, but cheerio's own serializer re-escapes the
+ * literal `&` that introduces each entity when it writes `$.html()`,
+ * turning `&#123;` into `&amp;#123;` -- which a browser renders as the
+ * literal text "&#123;", not "{". Those two tags carry real, unescaped
+ * JS/CSS (Astro treats their contents as raw via is:inline/is:global),
+ * so escaping braces there would corrupt the very scripts/styles this
+ * format depends on.
+ *
+ * Must run as the LAST step before a piece of captured content is
+ * embedded into its final .astro file -- confirmed live: calling this
+ * and then re-parsing the result with cheerio.load() (as the
+ * componentization pass does, to separate Layout boilerplate from
+ * page-specific content) decodes the &#123;/&#125; entities straight
+ * back into literal {/} characters, since that's what any standards-
+ * compliant HTML parser does with entities -- silently undoing the
+ * escape. Callers must apply this to each piece of genuinely-captured
+ * content (Layout's boilerplate, an extracted component's markup, a
+ * page's own body content) individually, never to a string that also
+ * contains this tool's own generated Astro syntax ({expression}
+ * props/conditionals it writes itself, which must stay literal).
+ */
+function escapeCurlyBraces(html: string): string {
+  return html
+    .split(/(<script[^>]*>[\s\S]*?<\/script>|<style[^>]*>[\s\S]*?<\/style>)/i)
+    .map((segment) => {
+      if (/^<(script|style)/i.test(segment)) return segment;
+      return segment.replace(/{/g, '&#123;').replace(/}/g, '&#125;');
+    })
+    .join('');
 }
 
 export const astroStrategy: ExporterStrategy = {
@@ -458,46 +516,31 @@ export const astroStrategy: ExporterStrategy = {
       });
     }
 
-    // --- Pass 4: finish each page --------------------------------------
+    // --- Pass 4: finish each page's HTML string (not written yet) ------
+    // Deliberately stops short of writing to disk, and stops short of the
+    // CSS-import frontmatter too -- Pass 5 below needs every page's fully-
+    // fixed HTML (hydration JS already stripped, guard scripts already
+    // injected, everything this pass does) as PARSEABLE HTML with no
+    // frontmatter mixed in, so it can correctly separate genuine shared
+    // boilerplate (which may include things this pass just added, like
+    // the guard scripts) from page-specific content before deciding what
+    // gets written where and generating the final frontmatter (CSS
+    // imports plus, now, a Layout import and any extracted-component
+    // imports) once that's settled.
+    const finishedPages: Array<{ route: string; filename: string; html: string; styleTexts: string[]; widgets: WidgetKind[] }> = [];
     for (const p of perPage) {
       const { route, filename, $, promoClass, styleTexts, widgets } = p;
 
       let html = '<!DOCTYPE html>\n' + $.html();
 
-      // Astro's template language treats a bare `{` in HTML body content as
-      // the start of a JS expression (same rule as JSX) -- so any captured
-      // page whose actual content happens to contain literal curly braces
-      // (a code sample shown as text, a "use the {variable} placeholder"
-      // sentence, anything like that) makes the Astro compiler try to parse
-      // whatever follows as JavaScript and fail with a bare "Unexpected
-      // token", pointing at some mid-page line that looks nothing like the
-      // real problem. Confirmed live: a Webflow template's own "how to
-      // integrate Lenis smooth scroll" documentation page, showing example
-      // init code (`new Lenis({...})`) as syntax-highlighted text, broke
-      // the whole build over one `{` in that displayed sample -- not
-      // anything specific to Lenis or that template, this hits any
-      // captured page with visible curly-brace content.
-      //
-      // Fixed by escaping to numeric HTML entities, which render
-      // identically in the browser and don't trip Astro's expression
-      // parser -- but done here as a string-level pass over the already-
-      // serialized HTML, split around <script>/<style> blocks (which,
-      // unlike arbitrary divs, never nest, so a non-greedy tag-to-matching-
-      // close-tag split is reliable). An earlier attempt escaped text nodes
-      // in the cheerio DOM directly, but cheerio's own serializer re-
-      // escapes the literal `&` that introduces each entity when it writes
-      // `$.html()`, turning `&#123;` into `&amp;#123;` -- which a browser
-      // renders as the literal text "&#123;", not "{". Those two tags carry
-      // real, unescaped JS/CSS (Astro treats their contents as raw via
-      // is:inline/is:global below), so escaping braces there would corrupt
-      // the very scripts/styles this format depends on.
-      html = html
-        .split(/(<script[^>]*>[\s\S]*?<\/script>|<style[^>]*>[\s\S]*?<\/style>)/i)
-        .map((segment) => {
-          if (/^<(script|style)/i.test(segment)) return segment;
-          return segment.replace(/{/g, '&#123;').replace(/}/g, '&#125;');
-        })
-        .join('');
+      // Curly-brace escaping (see escapeCurlyBraces above) deliberately
+      // does NOT happen here -- Pass 5 below re-parses this html string
+      // with cheerio to separate Layout boilerplate from page-specific
+      // content, and HTML parsers decode entities back to literal
+      // characters, which would silently undo an escape applied at this
+      // point. Applied instead as the last step before each piece of
+      // captured content (Layout boilerplate, an extracted component,
+      // this page's own body content) is embedded into its final file.
 
       // Astro auto-scopes <style> and auto-bundles <script> tags by default
       // (rewriting selectors with a data-astro-cid-* attribute, splitting
@@ -646,23 +689,161 @@ export const astroStrategy: ExporterStrategy = {
         html = html.replace('</body>', scripts + '</body>');
       }
 
-      // Frontmatter imports for the CSS blocks Pass 1 pulled out of this
-      // page, in their ORIGINAL tag order (not grouped by scope) -- a page
-      // that had global, then shared, then page-specific CSS in that
-      // sequence gets imports in that same sequence, so Vite's cascade
-      // ordering matches what the browser originally saw. Frontmatter must
-      // be the very first thing in the file, before the <!DOCTYPE html>
-      // this format always emits.
-      if (styleTexts.length > 0) {
-        const depth = filename.split('/').length; // pages/<...>/<file>.astro -> steps back to src/
-        const upToSrc = '../'.repeat(depth);
-        const importLines = styleTexts.map((text) => `import '${upToSrc}${styleFiles.get(hashOf(text))!.relPath}';`);
-        html = `---\n${importLines.join('\n')}\n---\n${html}`;
+      finishedPages.push({ route, filename, html, styleTexts, widgets });
+    }
+
+    // --- Pass 5: componentize -- Layout + shared body components, write --
+    // The actual "restructure into proper Astro" step: turns N flat pages
+    // (each still, up to this point, carrying its own full
+    // <html><head>...<body> boilerplate and copy-pasted nav/footer
+    // markup) into a shared Layout.astro plus extracted components for
+    // whatever markup repeats verbatim across pages.
+    console.log('  [Compiler] Componentizing...');
+
+    // Re-parse each page's fully-fixed HTML string (every per-page fix
+    // from Pass 3/4 already applied) so cross-page comparison sees the
+    // real, final markup -- including content Pass 4 itself added, like
+    // the guard scripts, which need to end up correctly classified as
+    // shared boilerplate too, not left duplicated on every page.
+    const parsedPages = finishedPages.map((p) => ({ ...p, $: cheerio.load(p.html) }));
+
+    // Probe parse per page, separate from the real one above: computing
+    // metaPropsByRoute/headResult needs the known SEO tags already pulled
+    // out of <head> to correctly compare what's left for boilerplate, but
+    // extractMetaProps is destructive (removes the tags from the DOM it's
+    // given). Running it against a throwaway parse first, instead of the
+    // real pp.$ every page's final output is built from, means a
+    // single-page site (or any site where headResult.boilerplate ends up
+    // null) never has its title/description/canonical/og:*/twitter:* tags
+    // silently removed with nothing putting them back -- confirmed live
+    // this would otherwise drop that content outright, since only the
+    // usesLayout branch below re-inserts them, via Layout's props.
+    const metaPropsByRoute = new Map<string, ReturnType<typeof extractMetaProps>>();
+    const headProbeInputs = finishedPages.map((p) => {
+      const $probe = cheerio.load(p.html);
+      metaPropsByRoute.set(p.route, extractMetaProps($probe));
+      return { route: p.route, headInnerHtml: $probe('head').html() || '', htmlAttrs: serializeHtmlAttrs($probe) };
+    });
+
+    function serializeHtmlAttrs($page: cheerio.CheerioAPI): string {
+      const el = $page('html').get(0) as unknown as { attribs?: Record<string, string> } | undefined;
+      const attribs = el?.attribs || {};
+      return Object.entries(attribs)
+        .map(([k, v]) => ` ${k}="${v}"`)
+        .join('');
+    }
+
+    const headResult = computeHeadBoilerplate(headProbeInputs);
+
+    const bodyComponents = findSharedBodyComponents(parsedPages.map((pp) => ({ route: pp.route, $: pp.$ })));
+
+    const usesLayout = headResult.boilerplate !== null;
+    if (usesLayout) {
+      // Only now, having confirmed Layout will actually own these tags,
+      // strip them from the REAL per-page $ that final serialization
+      // uses below (idempotent with the probe values already captured --
+      // same tags, same values -- this call's return is discarded).
+      for (const pp of parsedPages) extractMetaProps(pp.$);
+      const layoutDir = path.join(outputDir, 'src', 'layouts');
+      await fs.mkdir(layoutDir, { recursive: true });
+      const escapedHeadResult = { ...headResult, boilerplate: headResult.boilerplate !== null ? escapeCurlyBraces(headResult.boilerplate) : null };
+      await fs.writeFile(path.join(layoutDir, 'Layout.astro'), buildLayoutFile(escapedHeadResult), 'utf-8');
+      console.log('        Generated src/layouts/Layout.astro');
+    }
+
+    // Whether each extracted component actually needed the currentPath
+    // prop (only true when it carries one of the two known active-link
+    // conventions -- templateActiveLinks is a no-op otherwise).
+    const componentNeedsCurrentPath = new Map<string, boolean>();
+    if (bodyComponents.length > 0) {
+      const componentsDir = path.join(outputDir, 'src', 'components');
+      await fs.mkdir(componentsDir, { recursive: true });
+      for (const comp of bodyComponents) {
+        const escaped = escapeCurlyBraces(comp.representativeHtml);
+        const templated = templateActiveLinks(escaped);
+        const needsProp = templated !== escaped;
+        componentNeedsCurrentPath.set(comp.name, needsProp);
+        const content = needsProp ? `---\nconst { currentPath } = Astro.props;\n---\n${templated}\n` : `${templated}\n`;
+        await fs.writeFile(path.join(componentsDir, `${comp.name}.astro`), content, 'utf-8');
+      }
+      console.log(`        Extracted ${bodyComponents.length} shared component(s): ${bodyComponents.map((c) => c.name).join(', ')}`);
+    }
+
+    // Safe JSX-style prop attribute: wraps the value as a JSON-stringified
+    // JS expression (Astro's {expression} syntax) rather than a literal
+    // HTML attribute string, so Astro's own compiler handles escaping --
+    // a title/description containing a literal `"` or `&` renders
+    // correctly either way, where hand-building an HTML-quoted attribute
+    // string would need its own separate escaping pass.
+    function astroProp(name: string, value: string | null): string {
+      if (value === null) return '';
+      return ` ${name}={${JSON.stringify(value)}}`;
+    }
+
+    for (const pp of parsedPages) {
+      const { route, filename, $: pageDollar, styleTexts } = pp;
+      const depth = filename.split('/').length; // pages/<...>/<file>.astro -> steps back to src/
+      const upToSrc = '../'.repeat(depth);
+      const frontmatterLines: string[] = [];
+
+      // Splice component references in: each detected body component
+      // with an occurrence on this route gets its matched element
+      // replaced with a unique HTML-comment marker, swapped for the real
+      // Astro component tag AFTER string serialization below -- cheerio's
+      // serializer HTML-encodes attribute values, which would corrupt a
+      // currentPath={...} expression if inserted as a real attribute
+      // through the DOM instead.
+      const markers = new Map<string, string>();
+      let markerIndex = 0;
+      const usedComponents = new Set<string>();
+      for (const comp of bodyComponents) {
+        const occ = comp.occurrences.find((o) => o.route === route);
+        if (!occ) continue;
+        usedComponents.add(comp.name);
+        const marker = `UNCAGE_COMPONENT_MARKER_${markerIndex++}`;
+        const propsAttr = componentNeedsCurrentPath.get(comp.name) ? ` currentPath={${JSON.stringify(route)}}` : '';
+        markers.set(marker, `<${comp.name}${propsAttr} />`);
+        pageDollar(occ.el).replaceWith(`<!--${marker}-->`);
+      }
+      for (const name of usedComponents) {
+        frontmatterLines.push(`import ${name} from '${upToSrc}components/${name}.astro';`);
+      }
+      for (const text of styleTexts) {
+        frontmatterLines.push(`import '${upToSrc}${styleFiles.get(hashOf(text))!.relPath}';`);
+      }
+
+      let finalHtml: string;
+      if (usesLayout) {
+        frontmatterLines.unshift(`import Layout from '${upToSrc}layouts/Layout.astro';`);
+        const bodyHtml = escapeCurlyBraces(pageDollar('body').html() || '');
+        const extraHead = headResult.perPageExtra.get(route);
+        const metaProps = metaPropsByRoute.get(route)!;
+        const propAttrs =
+          astroProp('title', metaProps.title) +
+          astroProp('description', metaProps.description) +
+          astroProp('canonical', metaProps.canonical) +
+          astroProp('ogTitle', metaProps.ogTitle) +
+          astroProp('ogDescription', metaProps.ogDescription) +
+          astroProp('ogUrl', metaProps.ogUrl) +
+          astroProp('ogImage', metaProps.ogImage) +
+          astroProp('twitterTitle', metaProps.twitterTitle) +
+          astroProp('twitterDescription', metaProps.twitterDescription);
+        const headSlot = extraHead ? `<Fragment slot="head-extra">${escapeCurlyBraces(extraHead)}</Fragment>\n` : '';
+        finalHtml = `---\n${frontmatterLines.join('\n')}\n---\n<Layout${propAttrs}>\n${headSlot}${bodyHtml}\n</Layout>\n`;
+      } else {
+        // No genuine shared boilerplate across the site (e.g. a
+        // single-page export) -- keep the full document structure as
+        // before, component tags spliced in but no Layout wrapper.
+        finalHtml = (frontmatterLines.length > 0 ? `---\n${frontmatterLines.join('\n')}\n---\n` : '') + '<!DOCTYPE html>\n' + escapeCurlyBraces(pageDollar.html());
+      }
+
+      for (const [marker, replacement] of markers) {
+        finalHtml = finalHtml.replace(`<!--${marker}-->`, replacement);
       }
 
       const filePath = path.join(pagesDir, filename);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, html, 'utf-8');
+      await fs.writeFile(filePath, finalHtml, 'utf-8');
       console.log(`        Generated src/pages/${filename}`);
     }
   },

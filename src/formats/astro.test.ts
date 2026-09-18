@@ -198,10 +198,16 @@ describe('Astro format: cross-page CSS extraction', () => {
     const one = await pageSource('one.astro');
     const frontmatter = one.slice(0, one.indexOf('---', 3));
     const importLines = frontmatter.split('\n').filter((l) => l.startsWith('import'));
-    expect(importLines).toHaveLength(2);
+    // Both pages here share identical minimal boilerplate (no title/meta
+    // at all, just the <style> blocks under test), so componentization
+    // correctly adds a shared Layout import too -- filtered out here
+    // since this test is specifically about CSS cascade order, covered
+    // separately by the componentization tests.
+    const cssImportLines = importLines.filter((l) => !l.includes('layouts/Layout'));
+    expect(cssImportLines).toHaveLength(2);
     // The shared block (A) must be imported before the page-specific block (B).
-    expect(importLines[0]).toMatch(/shared|global/);
-    expect(importLines[1]).toMatch(/pages\/one/);
+    expect(cssImportLines[0]).toMatch(/shared|global/);
+    expect(cssImportLines[1]).toMatch(/pages\/one/);
   });
 
   it('adds no frontmatter import block for a page with zero <style> tags (Webflow-style external CSS)', async () => {
