@@ -30,6 +30,27 @@ export function routeToAstroFilename(route: string): string {
 }
 
 /**
+ * A page's internal route key isn't always its actual public URL --
+ * confirmed live (bakery-co): the homepage's own route key comes through
+ * as "/index" while every link to it in the captured markup uses
+ * href="/" (the real, public homepage URL; nothing ever links to
+ * "/index" literally). routeToAstroFilename above already special-cases
+ * this exact set of raw forms when deciding the output filename -- this
+ * mirrors that same normalization for anywhere a route needs to be
+ * compared against an href instead (the componentization pass's
+ * currentPath prop, which drives which nav link renders as active).
+ * Without it, the comparison in templateActiveLinks's generated
+ * `currentPath === href` expression silently never matched on the
+ * homepage specifically -- every OTHER page's route key happens to
+ * equal its own href already, so only the homepage's active-link state
+ * was affected.
+ */
+function normalizeRouteForComparison(route: string): string {
+  if (!route || route === '/' || route === '/index') return '/';
+  return route;
+}
+
+/**
  * Framer's own "More Templates / Use for Free" marketplace cross-sell card is
  * a live component in the page's React tree, not just static markup — it gets
  * re-created by client-side hydration even when deleted from the server HTML.
@@ -848,7 +869,7 @@ export const astroStrategy: ExporterStrategy = {
         if (!occ) continue;
         usedComponents.add(comp.name);
         const marker = `UNCAGE_COMPONENT_MARKER_${markerIndex++}`;
-        const propsAttr = componentNeedsCurrentPath.get(comp.name) ? ` currentPath={${JSON.stringify(route)}}` : '';
+        const propsAttr = componentNeedsCurrentPath.get(comp.name) ? ` currentPath={${JSON.stringify(normalizeRouteForComparison(route))}}` : '';
         markers.set(marker, `<${comp.name}${propsAttr} />`);
         pageDollar(occ.el).replaceWith(`<!--${marker}-->`);
       }

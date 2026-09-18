@@ -521,6 +521,42 @@ describe('Astro format: resolves Framer relative hrefs to absolute paths', () =>
   });
 });
 
+describe('Astro format: currentPath prop normalizes the homepage route key (bakery-co regression)', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  it('passes "/" (not "/index") as currentPath on the homepage, so the shared component\'s active-link check can match', async () => {
+    // Reproduces the real bakery-co bug verbatim: the crawler's internal
+    // route key for the homepage is the literal string "/index"
+    // (extractor.ts normalizes pathname "/" to "/index" as a Record key),
+    // but every link TO the homepage in captured markup uses the real
+    // public href="/" -- nothing ever links to "/index" literally. A nav
+    // shared across pages (big enough and present on every page to be
+    // extracted, with a data-framer-page-link-current active marker so
+    // templateActiveLinks kicks in) needs currentPath="/" on the
+    // homepage specifically, or its generated `currentPath === href`
+    // check silently never matches there while working correctly on
+    // every other page (whose route key already equals its own href).
+    const nav =
+      '<nav class="site-nav" data-pad="' + 'x'.repeat(420) + '">' +
+      '<a href="/" data-framer-page-link-current="true">Home</a><a href="/about">About</a>' +
+      '</nav>';
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-currentpath-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, {
+      '/index': `<!DOCTYPE html><html><head></head><body>${nav}<p>Home content</p></body></html>`,
+      '/about': `<!DOCTYPE html><html><head></head><body>${nav}<p>About content</p></body></html>`,
+      '/contact': `<!DOCTYPE html><html><head></head><body>${nav}<p>Contact content</p></body></html>`,
+    });
+    const indexSource = await fs.readFile(path.join(outputDir, 'src', 'pages', 'index.astro'), 'utf-8');
+    expect(indexSource).toContain('currentPath={"/"}');
+    expect(indexSource).not.toContain('currentPath={"/index"}');
+  });
+});
+
 describe('Astro format: uncage-runtime widget injection', () => {
   const tmpDirs: string[] = [];
 
