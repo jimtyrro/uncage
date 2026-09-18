@@ -16,6 +16,30 @@
  * instance across all locally captured projects this was developed
  * against) -- not attempted here to avoid shipping an unverified
  * reimplementation for a low-frequency case.
+ *
+ * Two Webflow slider animation modes exist (root element's
+ * data-animation attribute), and they need genuinely different runtime
+ * mechanics, not just different CSS:
+ *   - "slide" (default): slides sit side by side in a flex track: the
+ *     mask viewport is fixed-width and the track slides underneath it.
+ *     Handled below via mask.style.transform = translateX(...).
+ *   - "cross" (crossfade): Webflow's own CSS already stacks every slide
+ *     in the same position (no flex track, no translate needed at all);
+ *     only the active slide's visibility/opacity differs. Confirmed live
+ *     (tripora bug report): the captured, settled HTML already carries
+ *     inline `visibility: hidden` on every non-active slide (baked in by
+ *     the earlier "settle animation states" pass, matching Webflow's own
+ *     crossfade resting state) -- driving this the "slide" way instead
+ *     scrolled the mask to the right position but left the target slide
+ *     still `visibility:hidden` underneath, rendering an empty gap.
+ *     Fixed by branching: for "cross" sliders, never touch the mask's
+ *     transform/display/flex at all, and instead toggle each slide's own
+ *     visibility/opacity directly -- an instant swap, not a timed
+ *     crossfade (Webflow's own smooth transition was driven by
+ *     webflow.js's easing engine, which this runtime doesn't reproduce;
+ *     an instant, correct swap is the safe baseline, matching this
+ *     runtime's "functional replacement, not pixel-perfect animation
+ *     reproduction" scope everywhere else).
  */
 (function () {
   'use strict';
@@ -30,16 +54,25 @@
 
     var current = 0;
     var infinite = root.getAttribute('data-infinite') !== 'false';
+    var isCrossfade = root.getAttribute('data-animation') === 'cross';
     var dots = root.querySelectorAll('.w-slider-nav .w-slider-dot');
     var leftArrow = root.querySelector('.w-slider-arrow-left');
     var rightArrow = root.querySelector('.w-slider-arrow-right');
 
     function render() {
-      mask.style.transform = 'translateX(' + -current * 100 + '%)';
+      if (isCrossfade) {
+        for (var c = 0; c < slides.length; c++) {
+          var active = c === current;
+          slides[c].style.visibility = active ? 'visible' : 'hidden';
+          slides[c].style.opacity = active ? '1' : '0';
+        }
+      } else {
+        mask.style.transform = 'translateX(' + -current * 100 + '%)';
+      }
       for (var i = 0; i < dots.length; i++) {
-        var active = i === current;
-        dots[i].classList.toggle('w-active', active);
-        dots[i].setAttribute('aria-pressed', String(active));
+        var dotActive = i === current;
+        dots[i].classList.toggle('w-active', dotActive);
+        dots[i].setAttribute('aria-pressed', String(dotActive));
       }
     }
 
@@ -60,9 +93,11 @@
       })(d);
     }
 
-    mask.style.display = 'flex';
-    for (var s = 0; s < slides.length; s++) {
-      slides[s].style.flex = '0 0 100%';
+    if (!isCrossfade) {
+      mask.style.display = 'flex';
+      for (var s = 0; s < slides.length; s++) {
+        slides[s].style.flex = '0 0 100%';
+      }
     }
     render();
   }
