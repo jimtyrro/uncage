@@ -1,8 +1,16 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
 import type { ExporterStrategy } from '../types.js';
+import { detectWidgets, type WidgetKind } from '../interactivity.js';
+
+// Resolved relative to this file's own location (not process.cwd(), which
+// depends on where the CLI happened to be invoked from) so the vanilla-JS
+// widget replacements in src/runtime/ can be found and copied into any
+// output project regardless of invocation directory.
+const RUNTIME_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'runtime');
 
 export function routeToAstroFilename(route: string): string {
   if (!route || route === '/' || route === '/index') return 'index.astro';
@@ -95,7 +103,25 @@ export const astroStrategy: ExporterStrategy = {
     // Pulling them out here (before serializing to a per-page HTML string)
     // and content-hashing across ALL pages lets identical blocks collapse
     // to a single shared file instead of shipping full text on every page.
-    const perPage: Array<{ route: string; filename: string; $: cheerio.CheerioAPI; promoClass: string | null; styleTexts: string[] }> = [];
+    const perPage: Array<{ route: string; filename: string; $: cheerio.CheerioAPI; promoClass: string | null; styleTexts: string[]; widgets: WidgetKind[] }> = [];
+
+    // Detection needs the page's real CSS to check for things like
+    // scroll-pin's `position: sticky` rule, which Webflow templates often
+    // author in an EXTERNAL stylesheet rather than an inline <style> tag
+    // (confirmed live on archiesta -- read once here since it's the same
+    // site-wide file set for every page, not worth re-reading per page).
+    let externalCss = '';
+    try {
+      const cssDir = path.join(outputDir, 'public', 'assets', 'css');
+      const cssFiles = await fs.readdir(cssDir);
+      for (const f of cssFiles) {
+        if (f.endsWith('.css')) externalCss += (await fs.readFile(path.join(cssDir, f), 'utf-8')) + '\n';
+      }
+    } catch {
+      // No external CSS directory (e.g. a pure-Framer capture with
+      // everything inlined) -- fine, detection just runs on inline
+      // <style> text alone in that case.
+    }
 
     for (const [route, htmlContent] of Object.entries(pages)) {
       const filename = routeToAstroFilename(route);
@@ -146,7 +172,19 @@ export const astroStrategy: ExporterStrategy = {
         $(el).remove();
       });
 
-      perPage.push({ route, filename, $, promoClass, styleTexts });
+      // Which uncage-runtime widget modules this specific page needs --
+      // run before the opacity bake-in below so detection sees the
+      // original will-change/opacity signature (the bake-in only changes
+      // the opacity VALUE, not whether will-change is present, so order
+      // doesn't actually change the result, but keeping detection ahead
+      // of any further DOM mutation keeps this unambiguous). cssText
+      // combines the site-wide external stylesheets with this page's own
+      // (now-extracted) inline blocks, matching what interactivity.ts's
+      // own verification against real captures required for accurate
+      // scroll-pin detection.
+      const widgets = detectWidgets($, externalCss + styleTexts.join('\n')).map((w) => w.kind);
+
+      perPage.push({ route, filename, $, promoClass, styleTexts, widgets });
     }
 
     // --- Pass 2: content-addressed dedup across all pages -----------------
@@ -201,9 +239,26 @@ export const astroStrategy: ExporterStrategy = {
       console.log(`        Extracted ${styleFiles.size} CSS file(s): ${globalCount} global, ${sharedCount} shared, ${pageCount} page-specific`);
     }
 
+    // Copy only the uncage-runtime widget modules actually needed
+    // (union across every page, so a site with no carousels anywhere
+    // never ships carousel.js) into a shared location every page can
+    // reference by a stable path, then hash the whole batch once for a
+    // long-lived cache-busting query string -- these rarely change
+    // between builds, so worth caching hard across page navigations.
+    const neededWidgets = new Set<WidgetKind>();
+    for (const p of perPage) for (const w of p.widgets) neededWidgets.add(w);
+    if (neededWidgets.size > 0) {
+      const runtimeOutDir = path.join(outputDir, 'public', 'assets', 'js', 'uncage-runtime');
+      await fs.mkdir(runtimeOutDir, { recursive: true });
+      for (const kind of neededWidgets) {
+        await fs.copyFile(path.join(RUNTIME_DIR, `${kind}.js`), path.join(runtimeOutDir, `${kind}.js`));
+      }
+      console.log(`        Copied ${neededWidgets.size} uncage-runtime widget module(s): ${[...neededWidgets].join(', ')}`);
+    }
+
     // --- Pass 3: finish each page -------------------------------------
     for (const p of perPage) {
-      const { route, filename, $, promoClass, styleTexts } = p;
+      const { route, filename, $, promoClass, styleTexts, widgets } = p;
 
       // Step 2 of the broader "drop hydration" plan: bake the settled,
       // fully-revealed state into the static markup itself, rather than
@@ -370,6 +425,23 @@ export const astroStrategy: ExporterStrategy = {
       // right when it would have settled on its own anyway.
       const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
       html = html.replace('<head>', '<head>' + stuckTransformGuard);
+
+      // uncage-runtime: the vanilla-JS replacements for whichever widget
+      // archetypes this specific page actually uses (interactivity.ts's
+      // detection above), loaded from the shared, deduplicated copy Pass
+      // 2 wrote once for the whole site. Deferred rather than blocking --
+      // none of these need to run before paint (entrance-reveal's own
+      // above-the-fold check already handles first-paint content
+      // correctly), and page-root-relative paths work regardless of this
+      // page's own nesting depth. Placed at the end of <body> so the
+      // widget markup they target already exists in the DOM by the time
+      // each script runs.
+      if (widgets.length > 0) {
+        const scripts = widgets
+          .map((kind) => `<script is:inline src="/assets/js/uncage-runtime/${kind}.js" defer></script>`)
+          .join('');
+        html = html.replace('</body>', scripts + '</body>');
+      }
 
       // Frontmatter imports for the CSS blocks Pass 1 pulled out of this
       // page, in their ORIGINAL tag order (not grouped by scope) -- a page

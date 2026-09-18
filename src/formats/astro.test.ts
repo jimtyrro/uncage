@@ -300,3 +300,62 @@ describe('Astro format: bake settled opacity for JS-controlled elements', () => 
     expect(astro).toContain('opacity: 1');
   });
 });
+
+describe('Astro format: uncage-runtime widget injection', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compilePage(html: string): Promise<{ astro: string; outputDir: string }> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-runtime-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    const astro = await fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+    return { astro, outputDir };
+  }
+
+  it('injects a script tag and copies the runtime file for a detected widget', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '</body></html>';
+    const { astro, outputDir } = await compilePage(html);
+    expect(astro).toContain('src="/assets/js/uncage-runtime/carousel.js"');
+    const copied = await fs.readFile(path.join(outputDir, 'public', 'assets', 'js', 'uncage-runtime', 'carousel.js'), 'utf-8');
+    expect(copied.length).toBeGreaterThan(0);
+  });
+
+  it('injects nothing for a page with no detected widgets', async () => {
+    const html = '<!DOCTYPE html><html><head></head><body><p>Plain content</p></body></html>';
+    const { astro, outputDir } = await compilePage(html);
+    expect(astro).not.toContain('uncage-runtime');
+    await expect(fs.access(path.join(outputDir, 'public', 'assets', 'js', 'uncage-runtime'))).rejects.toThrow();
+  });
+
+  it('injects multiple scripts when a page has multiple detected widgets', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '<div role="tab">Tab</div>' +
+      '<div data-framer-cursor="grab">Grabbable</div>' +
+      '</body></html>';
+    const { astro } = await compilePage(html);
+    expect(astro).toContain('uncage-runtime/carousel.js');
+    expect(astro).toContain('uncage-runtime/tabs.js');
+    expect(astro).toContain('uncage-runtime/custom-cursor.js');
+  });
+
+  it('places injected scripts before the closing </body> tag', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '</body></html>';
+    const { astro } = await compilePage(html);
+    const scriptIdx = astro.indexOf('uncage-runtime/carousel.js');
+    const bodyCloseIdx = astro.lastIndexOf('</body>');
+    expect(scriptIdx).toBeGreaterThan(0);
+    expect(scriptIdx).toBeLessThan(bodyCloseIdx);
+  });
+});
