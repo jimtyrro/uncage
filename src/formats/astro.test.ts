@@ -359,3 +359,75 @@ describe('Astro format: uncage-runtime widget injection', () => {
     expect(scriptIdx).toBeLessThan(bodyCloseIdx);
   });
 });
+
+describe('Astro format: strip Framer/Webflow hydration JS', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compilePage(html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-strip-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+  }
+
+  it('removes Framer\'s single bundled entry point (data-framer-bundle="main")', async () => {
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline type="module" async data-framer-bundle="main" fetchpriority="low" src="/assets/js/script_main.B-sOw9dJ.js"></script>' +
+      '</head><body><p>Hi</p></body></html>';
+    const astro = await compilePage(html);
+    expect(astro).not.toContain('script_main');
+    expect(astro).not.toContain('data-framer-bundle');
+  });
+
+  it('removes Webflow\'s core webflow.schunk.*.js and webflow.<hash>.*.js bundles', async () => {
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline src="/assets/js/webflow.schunk.36b8fb49256177c8-59fdaf6c.js" type="text/javascript"></script>' +
+      '<script is:inline src="/assets/js/webflow.7ee31ada.510e32fc05d62c78-a2665445.js" type="text/javascript"></script>' +
+      '</head><body><p>Hi</p></body></html>';
+    const astro = await compilePage(html);
+    expect(astro).not.toContain('webflow.schunk');
+    expect(astro).not.toContain('webflow.7ee31ada');
+  });
+
+  it('does NOT remove webfont loader (name collision risk: webfont vs webflow)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline src="/assets/js/webfont-3a3adf98.js" type="text/javascript"></script>' +
+      '</head><body><p>Hi</p></body></html>';
+    const astro = await compilePage(html);
+    expect(astro).toContain('webfont-3a3adf98.js');
+  });
+
+  it('does NOT remove jQuery, GSAP, Lenis, or other third-party dependencies', async () => {
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline src="/assets/js/jquery-3.5.1.min.js" type="text/javascript"></script>' +
+      '<script is:inline src="/assets/js/gsap.min-8e6c1f2e.js" type="text/javascript"></script>' +
+      '<script is:inline src="/assets/js/ScrollTrigger.min-3b699995.js" type="text/javascript"></script>' +
+      '<script is:inline src="/assets/js/lenis.min-6c2b1660.js" type="text/javascript"></script>' +
+      '</head><body><p>Hi</p></body></html>';
+    const astro = await compilePage(html);
+    expect(astro).toContain('jquery-3.5.1.min.js');
+    expect(astro).toContain('gsap.min-8e6c1f2e.js');
+    expect(astro).toContain('ScrollTrigger.min-3b699995.js');
+    expect(astro).toContain('lenis.min-6c2b1660.js');
+  });
+
+  it('does not disturb the injected uncage-runtime scripts', async () => {
+    const html =
+      '<!DOCTYPE html><html><head>' +
+      '<script is:inline type="module" async data-framer-bundle="main" src="/assets/js/script_main.js"></script>' +
+      '</head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '</body></html>';
+    const astro = await compilePage(html);
+    expect(astro).not.toContain('script_main');
+    expect(astro).toContain('uncage-runtime/carousel.js');
+  });
+});

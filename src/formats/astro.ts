@@ -426,6 +426,43 @@ export const astroStrategy: ExporterStrategy = {
       const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
       html = html.replace('<head>', '<head>' + stuckTransformGuard);
 
+      // Remove Framer/Webflow's own hydration JS now that uncage-runtime
+      // covers the interactive widgets it drove and the opacity bake-in
+      // pass above covers the static-correctness half of what it did --
+      // this is the actual "drop hydration" step the rest of Step 2
+      // built toward. Framer's own crawls, jQuery, and every genuinely
+      // third-party library the page independently depends on (GSAP,
+      // Lenis, SplitText, ScrollTrigger, web font loaders, analytics) are
+      // deliberately left alone -- no evidence anything here replaces
+      // them, and removing what isn't confirmed safe is exactly the
+      // mistake this whole plan has been careful to avoid.
+      //
+      // Framer: a single bundled entry point carries an explicit,
+      // reliable marker -- confirmed live on two separate captures
+      // (dermato, arkitect), both times the ONLY <script src> tag in the
+      // entire page is `<script type="module" data-framer-bundle="main"
+      // src="...">`. Everything else (react, framer's own runtime,
+      // motion, every component chunk) loads via that one entry point's
+      // own internal dynamic imports, never as separate <script> tags in
+      // the captured HTML -- removing this one tag is sufficient.
+      html = html.replace(/<script[^>]*\bdata-framer-bundle="main"[^>]*><\/script>/gi, '');
+
+      // Webflow: no equivalent marker exists (confirmed live: every
+      // <script> tag on a real Webflow capture carries nothing but
+      // type="text/javascript", no attribute distinguishing framework
+      // code from a template's own third-party dependencies), so this
+      // matches by the one thing that IS reliable -- Webflow's own
+      // asset-naming convention for its two core bundle families,
+      // `webflow.schunk.<hash>.js` and `webflow.<hash>.<hash>.js`
+      // (confirmed live: tripora ships exactly these two families, one
+      // main entry plus several schunk files). Matched as a `webflow.`
+      // PREFIX specifically (not a bare "webflow" substring) so this
+      // can't accidentally catch `webfont-*.js` (Google's web font
+      // loader, an entirely different, still-needed script -- "webfont"
+      // and "webflow" differ starting at the 5th character, but a looser
+      // substring match wouldn't have caught that).
+      html = html.replace(/<script[^>]*\ssrc="[^"]*\/webflow\.[^"]*\.js"[^>]*><\/script>/gi, '');
+
       // uncage-runtime: the vanilla-JS replacements for whichever widget
       // archetypes this specific page actually uses (interactivity.ts's
       // detection above), loaded from the shared, deduplicated copy Pass
