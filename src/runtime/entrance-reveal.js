@@ -14,6 +14,20 @@
  * get when JS is about to animate that property, never present on
  * authored CSS) -- so this only touches elements that were genuinely
  * JS-controlled in the original captured page, not incidental content.
+ *
+ * Excludes orbit's target elements specifically: a real conflict found
+ * live on dermato once the `orbit` widget was added -- this module's
+ * client-side check was will-change-only (no opacity check), broader
+ * than its own server-side interactivity.ts counterpart (which requires
+ * opacity < 1), so it was also matching orbit's continuously-rotating
+ * badges (will-change:transform, opacity already 1, transform a pure
+ * rotate()) and, since they're above the fold, revealing them on init --
+ * which hardcodes `transform: none`, permanently overwriting orbit's
+ * captured rotation angle before orbit.js's own init ever got to read
+ * it. A pure `rotate(Ndeg)` transform is exactly orbit's signature and
+ * never entrance-reveal's own (which bakes to `translateY(...)
+ * scale(...)` or similar, never a bare rotate), so excluding it here is
+ * precise, not a broad carve-out.
  */
 (function () {
   'use strict';
@@ -21,10 +35,17 @@
   var SELECTOR = '[style*="will-change"]';
   var REVEAL_CLASS = 'uncage-revealed';
   var HIDDEN_STYLE_ATTR = 'data-uncage-reveal-hidden';
+  var PURE_ROTATE_RE = /^rotate\(\s*-?[\d.]+deg\s*\)$/i;
+
+  function isOrbitTarget(el) {
+    var style = el.getAttribute('style') || '';
+    var m = style.match(/transform:\s*([^;]+)/i);
+    return !!m && PURE_ROTATE_RE.test(m[1].trim());
+  }
 
   function isRevealCandidate(el) {
     var style = el.getAttribute('style') || '';
-    return /will-change/i.test(style);
+    return /will-change/i.test(style) && !isOrbitTarget(el);
   }
 
   function hideInitially(el) {
@@ -54,7 +75,9 @@
     if (typeof IntersectionObserver === 'undefined') {
       // No observer support: reveal everything immediately rather than
       // leaving content permanently hidden -- correctness over polish.
-      for (var i = 0; i < candidates.length; i++) reveal(candidates[i]);
+      for (var i = 0; i < candidates.length; i++) {
+        if (isRevealCandidate(candidates[i])) reveal(candidates[i]);
+      }
       return;
     }
 
