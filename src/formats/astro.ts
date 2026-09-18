@@ -325,9 +325,14 @@ export const astroStrategy: ExporterStrategy = {
       console.log(`        Copied ${neededWidgets.size} uncage-runtime widget module(s): ${[...neededWidgets].join(', ')}`);
     }
 
-    // --- Pass 3: finish each page -------------------------------------
+    // --- Pass 3: per-page DOM fixes (opacity bake-in, orphaned images) ---
+    // Split out from the page-finishing pass below because the upcoming
+    // componentization step needs every page's $ already in its final,
+    // settled DOM state (these two fixes included) before it can compare
+    // pages against each other -- it has to run once, across every page
+    // at once, strictly after this loop and strictly before serialization.
     for (const p of perPage) {
-      const { route, filename, $, promoClass, styleTexts, widgets } = p;
+      const { $, styleTexts } = p;
 
       // Step 2 of the broader "drop hydration" plan: bake the settled,
       // fully-revealed state into the static markup itself, rather than
@@ -451,6 +456,11 @@ export const astroStrategy: ExporterStrategy = {
         const updated = (style && !style.trim().endsWith(';') ? style + '; ' : style) + 'max-width: 100%; height: auto;';
         $(el).attr('style', updated);
       });
+    }
+
+    // --- Pass 4: finish each page --------------------------------------
+    for (const p of perPage) {
+      const { route, filename, $, promoClass, styleTexts, widgets } = p;
 
       let html = '<!DOCTYPE html>\n' + $.html();
 
