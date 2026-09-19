@@ -198,16 +198,10 @@ describe('Astro format: cross-page CSS extraction', () => {
     const one = await pageSource('one.astro');
     const frontmatter = one.slice(0, one.indexOf('---', 3));
     const importLines = frontmatter.split('\n').filter((l) => l.startsWith('import'));
-    // Both pages here share identical minimal boilerplate (no title/meta
-    // at all, just the <style> blocks under test), so componentization
-    // correctly adds a shared Layout import too -- filtered out here
-    // since this test is specifically about CSS cascade order, covered
-    // separately by the componentization tests.
-    const cssImportLines = importLines.filter((l) => !l.includes('layouts/Layout'));
-    expect(cssImportLines).toHaveLength(2);
+    expect(importLines).toHaveLength(2);
     // The shared block (A) must be imported before the page-specific block (B).
-    expect(cssImportLines[0]).toMatch(/shared|global/);
-    expect(cssImportLines[1]).toMatch(/pages\/one/);
+    expect(importLines[0]).toMatch(/shared|global/);
+    expect(importLines[1]).toMatch(/pages\/one/);
   });
 
   it('adds no frontmatter import block for a page with zero <style> tags (Webflow-style external CSS)', async () => {
@@ -393,68 +387,6 @@ describe('Astro format: orphaned-image safety net (lost CSS-in-JS/hydration styl
   });
 });
 
-describe('Astro format: pretty-prints output instead of one dense line', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(async () => {
-    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
-  });
-
-  async function compileOnePage(html: string): Promise<string> {
-    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-pretty-test-'));
-    tmpDirs.push(outputDir);
-    await astroStrategy.compile(outputDir, { '/test': html });
-    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
-  }
-
-  it('breaks nested block elements across multiple indented lines', async () => {
-    const html = '<!DOCTYPE html><html><head></head><body><div><section><p>Hi</p></section></div></body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro.split('\n').length).toBeGreaterThan(3);
-    expect(astro).toMatch(/<div>\s*\n\s*<section>/);
-  });
-
-  it('does not introduce whitespace between adjacent inline elements with none originally', async () => {
-    // The real regression risk: a generic HTML formatter inserting
-    // rendering-visible whitespace between elements that were
-    // deliberately butted together (e.g. a price + currency symbol).
-    const html = '<!DOCTYPE html><html><head></head><body><p>Price:<span class="currency">$</span><span class="amount">99</span></p></body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro).toContain('Price:<span class="currency">$</span><span class="amount">99</span>');
-  });
-
-  it('preserves meaningful spacing around an inline link', async () => {
-    const html = '<!DOCTYPE html><html><head></head><body><p>Click <a href="/x">here</a> to continue.</p></body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro).toContain('Click <a href="/x">here</a> to continue.');
-  });
-
-  it('does not reformat the contents of an is:inline script (regex/nested-function risk)', async () => {
-    const html =
-      '<!DOCTYPE html><html><head></head><body>' +
-      '<script>(function(){var re=/style\\*="translate: none"/;if(re.test("x")){console.log("y")}})();</script>' +
-      '</body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro).toContain('var re=/style\\*="translate: none"/;if(re.test("x")){console.log("y")}');
-  });
-
-  it('keeps already-escaped curly-brace entities intact, not re-decoded', async () => {
-    const html = '<!DOCTYPE html><html><head></head><body><p>new Lenis({smooth: true})</p></body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro).toContain('new Lenis(&#123;smooth: true&#125;)');
-  });
-
-  it('preserves the frontmatter block exactly, unformatted', async () => {
-    const html =
-      '<!DOCTYPE html><html><head><style>.a{color:red}</style></head><body><p>Hi</p></body></html>';
-    const astro = await compileOnePage(html);
-    expect(astro.startsWith('---\n')).toBe(true);
-    const frontmatterEnd = astro.indexOf('---', 4);
-    const frontmatter = astro.slice(0, frontmatterEnd + 3);
-    expect(frontmatter).toMatch(/^---\nimport '\.\.\/styles\/pages\/test\/[a-f0-9]+\.css';\n---$/);
-  });
-});
-
 describe('Astro format: resolves Framer relative hrefs to absolute paths', () => {
   const tmpDirs: string[] = [];
 
@@ -518,42 +450,6 @@ describe('Astro format: resolves Framer relative hrefs to absolute paths', () =>
     expect(astro).toContain('href="mailto:hello@example.com"');
     expect(astro).toContain('href="tel:+1234567890"');
     expect(astro).toContain('href="#section"');
-  });
-});
-
-describe('Astro format: currentPath prop normalizes the homepage route key (bakery-co regression)', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(async () => {
-    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
-  });
-
-  it('passes "/" (not "/index") as currentPath on the homepage, so the shared component\'s active-link check can match', async () => {
-    // Reproduces the real bakery-co bug verbatim: the crawler's internal
-    // route key for the homepage is the literal string "/index"
-    // (extractor.ts normalizes pathname "/" to "/index" as a Record key),
-    // but every link TO the homepage in captured markup uses the real
-    // public href="/" -- nothing ever links to "/index" literally. A nav
-    // shared across pages (big enough and present on every page to be
-    // extracted, with a data-framer-page-link-current active marker so
-    // templateActiveLinks kicks in) needs currentPath="/" on the
-    // homepage specifically, or its generated `currentPath === href`
-    // check silently never matches there while working correctly on
-    // every other page (whose route key already equals its own href).
-    const nav =
-      '<nav class="site-nav" data-pad="' + 'x'.repeat(420) + '">' +
-      '<a href="/" data-framer-page-link-current="true">Home</a><a href="/about">About</a>' +
-      '</nav>';
-    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-currentpath-test-'));
-    tmpDirs.push(outputDir);
-    await astroStrategy.compile(outputDir, {
-      '/index': `<!DOCTYPE html><html><head></head><body>${nav}<p>Home content</p></body></html>`,
-      '/about': `<!DOCTYPE html><html><head></head><body>${nav}<p>About content</p></body></html>`,
-      '/contact': `<!DOCTYPE html><html><head></head><body>${nav}<p>Contact content</p></body></html>`,
-    });
-    const indexSource = await fs.readFile(path.join(outputDir, 'src', 'pages', 'index.astro'), 'utf-8');
-    expect(indexSource).toContain('currentPath={"/"}');
-    expect(indexSource).not.toContain('currentPath={"/index"}');
   });
 });
 
