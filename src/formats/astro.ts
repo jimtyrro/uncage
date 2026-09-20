@@ -1,17 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
-import postcss from 'postcss';
 import type { ExporterStrategy } from '../types.js';
-import { detectWidgets, type WidgetKind } from '../interactivity.js';
-
-// Resolved relative to this file's own location (not process.cwd(), which
-// depends on where the CLI happened to be invoked from) so the vanilla-JS
-// widget replacements in src/runtime/ can be found and copied into any
-// output project regardless of invocation directory.
-const RUNTIME_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'runtime');
 
 export function routeToAstroFilename(route: string): string {
   if (!route || route === '/' || route === '/index') return 'index.astro';
@@ -86,35 +77,6 @@ function detectPromoWidgetClass($: cheerio.CheerioAPI): string | null {
   return classAttr.split(/\s+/).filter(Boolean)[0] || null;
 }
 
-/**
- * Every class name referenced by any selector in a chunk of CSS text.
- * Used to detect elements whose styling was never captured at all (see
- * the orphaned-image safety net below) -- deliberately permissive: any
- * rule mentioning `.foo` anywhere in its selector (however compound --
- * `.foo.bar`, `.parent .foo:hover`, `.foo > .bar`) counts `foo` as
- * "known", since the goal is only to rule out genuinely orphaned
- * classes, not to model full selector specificity.
- */
-function collectKnownClassSelectors(cssText: string): Set<string> {
-  const known = new Set<string>();
-  try {
-    const root = postcss.parse(cssText);
-    root.walkRules((rule) => {
-      const classMatches = rule.selector.match(/\.[a-zA-Z_-][\w-]*/g);
-      if (classMatches) {
-        for (const c of classMatches) known.add(c.slice(1));
-      }
-    });
-  } catch {
-    // Malformed/partial CSS text (rare, but real captures do occasionally
-    // include a broken fragment) shouldn't crash the whole compile --
-    // worst case this under-populates the known-class set, which only
-    // makes the orphan check MORE conservative (more false "orphans"),
-    // never less safe.
-  }
-  return known;
-}
-
 export const astroStrategy: ExporterStrategy = {
   name: 'Astro',
   format: 'astro',
@@ -133,25 +95,7 @@ export const astroStrategy: ExporterStrategy = {
     // Pulling them out here (before serializing to a per-page HTML string)
     // and content-hashing across ALL pages lets identical blocks collapse
     // to a single shared file instead of shipping full text on every page.
-    const perPage: Array<{ route: string; filename: string; $: cheerio.CheerioAPI; promoClass: string | null; styleTexts: string[]; widgets: WidgetKind[] }> = [];
-
-    // Detection needs the page's real CSS to check for things like
-    // scroll-pin's `position: sticky` rule, which Webflow templates often
-    // author in an EXTERNAL stylesheet rather than an inline <style> tag
-    // (confirmed live on archiesta -- read once here since it's the same
-    // site-wide file set for every page, not worth re-reading per page).
-    let externalCss = '';
-    try {
-      const cssDir = path.join(outputDir, 'public', 'assets', 'css');
-      const cssFiles = await fs.readdir(cssDir);
-      for (const f of cssFiles) {
-        if (f.endsWith('.css')) externalCss += (await fs.readFile(path.join(cssDir, f), 'utf-8')) + '\n';
-      }
-    } catch {
-      // No external CSS directory (e.g. a pure-Framer capture with
-      // everything inlined) -- fine, detection just runs on inline
-      // <style> text alone in that case.
-    }
+    const perPage: Array<{ route: string; filename: string; $: cheerio.CheerioAPI; promoClass: string | null; styleTexts: string[] }> = [];
 
     for (const [route, htmlContent] of Object.entries(pages)) {
       const filename = routeToAstroFilename(route);
@@ -168,45 +112,6 @@ export const astroStrategy: ExporterStrategy = {
       $('#__framer-editorbar-container').remove();
       $('#__framer-badge-container').remove();
       $('script[data-fid]').remove();
-
-      // Framer emits relative hrefs (./, ../, ../../) for internal nav
-      // whose depth assumes a FLATTER routing model than Astro's actual
-      // static output produces. Astro serves each page as
-      // <route>/index.html, and every static file server this ends up
-      // deployed behind (confirmed live: nginx via the project's own
-      // Dockerfile) treats that as a real directory -- so a page's own
-      // effective URL depth is one level deeper than the relative math
-      // assumed when Framer originally generated these hrefs. Confirmed
-      // live on a real deployed build: clicking a footer "About" link
-      // (captured as href="../about") from a blog post page resolved to
-      // /blog/about, which doesn't exist, instead of /about -- broken
-      // navigation on every internal link on every page nested more than
-      // one level deep (any blog post, any project/work page).
-      //
-      // Fixed by resolving each relative href against this page's own
-      // route treated as a FILE, not a directory (i.e. no trailing slash
-      // on the base) -- confirmed live this exactly cancels out the extra
-      // directory-index level a real static file server adds, matching
-      // Framer's original assumption. Verified against every real
-      // relative href pattern observed on arkitect (./, ../, ../../,
-      // ../about, ../work/wave-house, ./category/design) -- all resolve
-      // to the correct absolute destination this way.
-      //
-      // Scoped to hrefs starting with `.` specifically so this never
-      // touches absolute paths, external URLs, or special schemes
-      // (mailto:, tel:, #anchor) -- and is a no-op on Webflow captures,
-      // confirmed live to already emit absolute paths with no relative
-      // hrefs at all.
-      $('a[href^="."]').each((_, el) => {
-        const href = $(el).attr('href')!;
-        try {
-          const resolved = new URL(href, 'https://uncage.invalid' + route).pathname;
-          $(el).attr('href', resolved);
-        } catch {
-          // Malformed href -- leave it as captured rather than crash the
-          // whole compile over one bad link.
-        }
-      });
 
       // Same stale-SRI-hash bug as html.ts: integrity is computed against
       // the original remote file's bytes, not our local capture - once
@@ -241,19 +146,7 @@ export const astroStrategy: ExporterStrategy = {
         $(el).remove();
       });
 
-      // Which uncage-runtime widget modules this specific page needs --
-      // run before the opacity bake-in below so detection sees the
-      // original will-change/opacity signature (the bake-in only changes
-      // the opacity VALUE, not whether will-change is present, so order
-      // doesn't actually change the result, but keeping detection ahead
-      // of any further DOM mutation keeps this unambiguous). cssText
-      // combines the site-wide external stylesheets with this page's own
-      // (now-extracted) inline blocks, matching what interactivity.ts's
-      // own verification against real captures required for accurate
-      // scroll-pin detection.
-      const widgets = detectWidgets($, externalCss + styleTexts.join('\n')).map((w) => w.kind);
-
-      perPage.push({ route, filename, $, promoClass, styleTexts, widgets });
+      perPage.push({ route, filename, $, promoClass, styleTexts });
     }
 
     // --- Pass 2: content-addressed dedup across all pages -----------------
@@ -308,190 +201,9 @@ export const astroStrategy: ExporterStrategy = {
       console.log(`        Extracted ${styleFiles.size} CSS file(s): ${globalCount} global, ${sharedCount} shared, ${pageCount} page-specific`);
     }
 
-    // Copy only the uncage-runtime widget modules actually needed
-    // (union across every page, so a site with no carousels anywhere
-    // never ships carousel.js) into a shared location every page can
-    // reference by a stable path, then hash the whole batch once for a
-    // long-lived cache-busting query string -- these rarely change
-    // between builds, so worth caching hard across page navigations.
-    const neededWidgets = new Set<WidgetKind>();
-    for (const p of perPage) for (const w of p.widgets) neededWidgets.add(w);
-    if (neededWidgets.size > 0) {
-      const runtimeOutDir = path.join(outputDir, 'public', 'assets', 'js', 'uncage-runtime');
-      await fs.mkdir(runtimeOutDir, { recursive: true });
-      for (const kind of neededWidgets) {
-        await fs.copyFile(path.join(RUNTIME_DIR, `${kind}.js`), path.join(runtimeOutDir, `${kind}.js`));
-      }
-      console.log(`        Copied ${neededWidgets.size} uncage-runtime widget module(s): ${[...neededWidgets].join(', ')}`);
-    }
-
     // --- Pass 3: finish each page -------------------------------------
     for (const p of perPage) {
-      const { route, filename, $, promoClass, styleTexts, widgets } = p;
-
-      // Step 2 of the broader "drop hydration" plan: bake the settled,
-      // fully-revealed state into the static markup itself, rather than
-      // relying on Framer/Webflow's own JS to un-hide it after load. Scope
-      // is deliberately narrow here -- opacity only, not transform. Opacity
-      // on a JS-controlled element is unambiguous: it always means
-      // "revealed vs. still hidden," never a legitimate permanent design
-      // choice (a real semi-transparent overlay is styled via a CSS rule).
-      // Transform is genuinely ambiguous on the same elements -- it can
-      // mean "hasn't slid into place yet" (safe to zero out) or "mid-way
-      // through a deliberate, ongoing scroll-linked effect" (zeroing it
-      // would be wrong) -- so that gets resolved per-widget by the
-      // runtime modules being added alongside this, not guessed at here.
-      //
-      // Detection is NOT scoped to GSAP's `translate: none` signature --
-      // checked against real captures (arkitect, dermato, bakery-co) and
-      // found zero matches for it there. GSAP is a Webflow-template
-      // pattern; Framer's own component runtime (Framer Motion) writes a
-      // structurally different inline style with no shared marker, and it
-      // was exactly the element responsible for arkitect's dark-screen
-      // bug (a full-screen page-transition overlay frozen at opacity:0)
-      // that the GSAP-only version of this check missed entirely.
-      //
-      // Instead: target inline `opacity` that is either (a) exactly 0, or
-      // (b) partial AND accompanied by `will-change` in the same style
-      // attribute (a CSS hint browsers only get when JS is about to
-      // animate that property -- never present on authored CSS). Verified
-      // against 589 real inline-opacity<1 elements across the three local
-      // Framer captures before committing to this shape: elements matching
-      // (a) or (b) were, on manual sampling, uniformly Framer's own
-      // entrance-reveal pattern (`will-change:transform;opacity:0;
-      // transform:translateY(...) scale(...)`, including a genuine footer
-      // "Quick Links" section correctly caught despite an unrelated
-      // "Menu"-named ancestor) or the near-1 tail of an animation mid-
-      // settle at crawl time (opacity values like 0.989551, imperceptible
-      // NEITHER signal -- e.g. arkitect's `.overlay`/`.desktop-overlay`
-      // background tints, hand-authored at a stable 0.1/0.2, no
-      // will-change, same value repeated identically every occurrence --
-      // were correctly excluded; forcing those to opacity:1 would turn a
-      // subtle tint into a solid block.
-      //
-      // One more exclusion, added after a real regression on bakery-co: a
-      // full-viewport `backdrop-filter: blur(...)` load-transition curtain
-      // was captured correctly already-settled at opacity:0 (its correct
-      // RESTING state -- it fades OUT to reveal the page, the opposite
-      // direction from an entrance-reveal element, which fades IN), and
-      // this pass forced it back to opacity:1, putting a permanent frosted
-      // veil over every page. It has neither will-change nor any other
-      // marker distinguishing it from a genuinely-stuck entrance-reveal at
-      // the DOM level -- both are bare `opacity:0` with no will-change --
-      // so the two cases need a different signal entirely. `backdrop-
-      // filter` is that signal: it's a glassmorphism/veil effect CSS
-      // property, applied to blur whatever renders BEHIND the element --
-      // never meaningful on the kind of element this pass exists to fix
-      // (real page content -- headings, images, sections -- has no reason
-      // to blur what's behind itself). Confirmed this doesn't shrink the
-      // arkitect fix's own coverage: re-inspected that element directly --
-      // it's a `position:fixed` dark circular shape (its own custom-cursor
-      // visual, unrelated to backdrop-filter) with no backdrop-filter
-      // anywhere in its style.
-      $('[style]').each((_, el) => {
-        const style = $(el).attr('style') || '';
-        const m = style.match(/opacity:\s*([\d.]+)/);
-        if (!m) return;
-        const value = parseFloat(m[1]!);
-        if (value >= 1) return;
-        if (style.includes('backdrop-filter')) return;
-        const looksAnimated = value === 0 || style.includes('will-change');
-        if (!looksAnimated) return;
-        const updated = style.replace(/opacity:\s*([\d.]+)(;?)/, (full, _val: string, term: string) => `opacity: 1${term}`);
-        if (updated !== style) $(el).attr('style', updated);
-      });
-
-      // Safety net for a different, harder problem than the opacity pass
-      // above: a bespoke code component (confirmed live on dermato -- a
-      // Framer "before/after" image-comparison widget) that styles itself
-      // via CSS-in-JS (Emotion, Framer's own documented approach for
-      // custom code components) injected at hydration time -- a mechanism
-      // no static crawler can see into, so its hash-named classes
-      // (`css-xxxxxxx`, unique per project -- not a hardcodable selector,
-      // there is nothing stable to target) ship with literally zero
-      // matching CSS anywhere in the export. Confirmed the observed
-      // failure mode live: an orphaned <img> renders at its raw file
-      // dimensions (1440x1920) instead of being sized to its card, and
-      // since it's position:static that height counts in normal document
-      // flow, ballooning the containing section by ~3300px and breaking
-      // the whole page layout below the fold.
-      //
-      // Not attempting to reconstruct the widget's actual behavior (the
-      // crop/reveal effect is genuinely unrecoverable, same "opaque,
-      // proprietary" category as custom-cursor's hash case) -- only
-      // preventing the catastrophic layout overflow. Any <img> whose
-      // classes match zero known selectors anywhere in this page's own
-      // extracted CSS or the site-wide external CSS (i.e. definitely lost
-      // its styling, not just a class this particular page doesn't use)
-      // gets the standard, safe web default for an unconstrained image:
-      // max-width:100%; height:auto. That degrades the fancy comparison
-      // effect (the two images may stack or overlap oddly instead of
-      // clipping) but keeps it within its natural container width instead
-      // of blowing out the page -- a real design compromise, not a fix
-      // for the widget itself.
-      //
-      // Scoped narrowly to reduce false positives: only <img> tags (not
-      // arbitrary elements -- unstyled non-replaced elements don't have
-      // an intrinsic size to overflow with), only when the class attribute
-      // is present and non-empty (a classless image is a different,
-      // plausibly-intentional case, not "styling was lost"), and skipped
-      // entirely if the element already has an explicit width/height
-      // attribute or inline size constraint (don't override an image that
-      // already has real sizing information, orphaned class or not).
-      const knownClasses = collectKnownClassSelectors(externalCss + styleTexts.join('\n'));
-      $('img').each((_, el) => {
-        const classAttr = $(el).attr('class');
-        if (!classAttr) return;
-        const classes = classAttr.split(/\s+/).filter(Boolean);
-        if (classes.length === 0) return;
-        if (classes.some((c) => knownClasses.has(c))) return;
-        if ($(el).attr('width') || $(el).attr('height')) return;
-        const style = $(el).attr('style') || '';
-        if (/\b(width|height|max-width|max-height)\s*:/i.test(style)) return;
-        const updated = (style && !style.trim().endsWith(';') ? style + '; ' : style) + 'max-width: 100%; height: auto;';
-        $(el).attr('style', updated);
-      });
-
-      // uncage-runtime: the vanilla-JS replacements for whichever widget
-      // archetypes this specific page actually uses (interactivity.ts's
-      // detection above), loaded from the shared, deduplicated copy Pass
-      // 2 wrote once for the whole site. Deferred rather than blocking --
-      // none of these need to run before paint (entrance-reveal's own
-      // above-the-fold check already handles first-paint content
-      // correctly), and page-root-relative paths work regardless of this
-      // page's own nesting depth. Appended to <body> so the widget markup
-      // they target already exists in the DOM by the time each script runs.
-      //
-      // Done here as a DOM append, while cheerio still owns the document,
-      // rather than as a string splice on the serialized HTML further
-      // down. A string approach cannot tell markup from text that merely
-      // looks like markup, and both obvious variants are provably wrong
-      // on real captures:
-      //   - `html.replace('</body>', ...)` takes the FIRST literal match.
-      //     Broke live on a Webflow template (linoxa) bundling a promo
-      //     widget whose own script carries an instructions comment
-      //     containing the text `</body>`. The splice landed inside that
-      //     comment; the `</script>` it inserted terminated the
-      //     third-party script early, and the page's real `</body>` was
-      //     left untouched -- two `</body>` for one `<body>`, which
-      //     Astro's compiler rejects outright.
-      //   - `html.lastIndexOf('</body>')` fixes that case but not the
-      //     class: cheerio preserves a comment that sits AFTER `</body>`
-      //     exactly where it is (verified -- unlike stray text or a
-      //     trailing <script>, which both get hoisted into <body>), so a
-      //     page ending in `<!-- ... </body> ... -->` puts the last match
-      //     inside that comment and silently buries these scripts in it.
-      // Appending through the parser sidesteps both: it targets the real
-      // <body> element, whatever inert text elsewhere happens to look
-      // like. Deliberately emitted WITHOUT `is:inline` -- the global
-      // stamping pass below adds it to every <script> on the page
-      // uniformly, and adding it here too would double the attribute.
-      if (widgets.length > 0) {
-        const scripts = widgets
-          .map((kind) => `<script src="/assets/js/uncage-runtime/${kind}.js" defer></script>`)
-          .join('');
-        $('body').append(scripts);
-      }
+      const { route, filename, $, promoClass, styleTexts } = p;
 
       let html = '<!DOCTYPE html>\n' + $.html();
 
@@ -606,59 +318,6 @@ export const astroStrategy: ExporterStrategy = {
       // right when it would have settled on its own anyway.
       const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
       html = html.replace('<head>', '<head>' + stuckTransformGuard);
-
-      // Remove Framer/Webflow's own hydration JS now that uncage-runtime
-      // covers the interactive widgets it drove and the opacity bake-in
-      // pass above covers the static-correctness half of what it did --
-      // this is the actual "drop hydration" step the rest of Step 2
-      // built toward. Framer's own crawls, jQuery, and every genuinely
-      // third-party library the page independently depends on (GSAP,
-      // Lenis, SplitText, ScrollTrigger, web font loaders, analytics) are
-      // deliberately left alone -- no evidence anything here replaces
-      // them, and removing what isn't confirmed safe is exactly the
-      // mistake this whole plan has been careful to avoid.
-      //
-      // Framer: a single bundled entry point carries an explicit,
-      // reliable marker -- confirmed live on two separate captures
-      // (dermato, arkitect), both times the ONLY <script src> tag in the
-      // entire page is `<script type="module" data-framer-bundle="main"
-      // src="...">`. Everything else (react, framer's own runtime,
-      // motion, every component chunk) loads via that one entry point's
-      // own internal dynamic imports, never as separate <script> tags in
-      // the captured HTML -- removing this one tag is sufficient to stop
-      // it EXECUTING.
-      //
-      // Not sufficient to stop the browser FETCHING those chunks, though
-      // -- confirmed live: removing only the <script> tag still triggered
-      // ~33 JS requests (react, framer, motion, every component chunk),
-      // because Framer's Vite-family bundler also emits one
-      // <link rel="modulepreload" href="..."> per chunk, and the browser
-      // honors that fetch HINT independently of whether the module it
-      // points at is ever actually imported/executed. modulepreload only
-      // has meaning for `type="module"` scripts, which is exclusively how
-      // Framer's bundle is typed -- Webflow's plain
-      // `type="text/javascript"` scripts never use it, confirmed across
-      // every Webflow capture this was checked against, so stripping this
-      // unconditionally (not gated on the Framer-specific branch above)
-      // is safe for both platforms.
-      html = html.replace(/<script[^>]*\bdata-framer-bundle="main"[^>]*><\/script>/gi, '');
-      html = html.replace(/<link[^>]*\srel="modulepreload"[^>]*>/gi, '');
-
-      // Webflow: no equivalent marker exists (confirmed live: every
-      // <script> tag on a real Webflow capture carries nothing but
-      // type="text/javascript", no attribute distinguishing framework
-      // code from a template's own third-party dependencies), so this
-      // matches by the one thing that IS reliable -- Webflow's own
-      // asset-naming convention for its two core bundle families,
-      // `webflow.schunk.<hash>.js` and `webflow.<hash>.<hash>.js`
-      // (confirmed live: tripora ships exactly these two families, one
-      // main entry plus several schunk files). Matched as a `webflow.`
-      // PREFIX specifically (not a bare "webflow" substring) so this
-      // can't accidentally catch `webfont-*.js` (Google's web font
-      // loader, an entirely different, still-needed script -- "webfont"
-      // and "webflow" differ starting at the 5th character, but a looser
-      // substring match wouldn't have caught that).
-      html = html.replace(/<script[^>]*\ssrc="[^"]*\/webflow\.[^"]*\.js"[^>]*><\/script>/gi, '');
 
       // Frontmatter imports for the CSS blocks Pass 1 pulled out of this
       // page, in their ORIGINAL tag order (not grouped by scope) -- a page
