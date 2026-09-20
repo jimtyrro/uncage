@@ -1070,14 +1070,24 @@ export function extractCssReferencedUrls(cssText: string, contextUrl: string): s
 }
 
 // Pure scan for every asset reference in HTML attributes that carry a URL
-// (src, srcset, poster) -- the raw-HTML counterpart to
-// extractCssReferencedUrls. Same rationale, different attack surface:
-// confirmed live on tripora, `<img>` tags belonging to a carousel/
-// testimonial widget whose non-active slides are only ever attached to
-// the DOM (with a real src) once that slide becomes current, so a static
-// crawl of every page still never causes the browser to request them.
+// (src, srcset, poster, and icon-family <link href>) -- the raw-HTML
+// counterpart to extractCssReferencedUrls. Same rationale, different
+// attack surfaces, both confirmed live:
+//   - tripora: <img> tags belonging to a carousel/testimonial widget
+//     whose non-active slides are only ever attached to the DOM (with a
+//     real src) once that slide becomes current, so a full 50-page crawl
+//     still never causes the browser to request them.
+//   - arkitect: <link rel="icon"/"apple-touch-icon" href="..."> favicons.
+//     A headless/automated page visit doesn't reliably trigger the same
+//     favicon fetch a real browser tab chrome does, so these silently
+//     stayed remote even though every other image on the same page
+//     downloaded fine.
 // srcset is comma-separated URL+descriptor pairs (`url 2x, url2 3x`);
-// each URL is extracted independently.
+// each URL is extracted independently. <link href> is scoped narrowly to
+// icon-family rel values specifically -- a bare `href` alone would also
+// match stylesheet/canonical/alternate links, which point at real pages
+// or CSS already covered by their own dedicated handling, not orphaned
+// image assets.
 export function extractHtmlReferencedUrls(html: string, pageUrl: string): string[] {
   const found: string[] = [];
   const resolve = (raw: string) => {
@@ -1097,6 +1107,14 @@ export function extractHtmlReferencedUrls(html: string, pageUrl: string): string
       const url = entry.trim().split(/\s+/)[0];
       if (url) resolve(url);
     }
+  }
+
+  const iconLinkRe = /<link\b[^>]*>/gi;
+  while ((m = iconLinkRe.exec(html))) {
+    const tag = m[0];
+    if (!/\brel\s*=\s*["'][^"']*icon[^"']*["']/i.test(tag)) continue;
+    const hrefMatch = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i);
+    if (hrefMatch) resolve(hrefMatch[1]!);
   }
 
   return found;

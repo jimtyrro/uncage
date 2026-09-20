@@ -128,6 +128,24 @@ describe('extractHtmlReferencedUrls', () => {
     const html = '<img src="data:image/png;base64,AAAA">';
     expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([]);
   });
+
+  it('finds a favicon/apple-touch-icon <link href> (real arkitect capture)', () => {
+    const html =
+      '<link href="https://framerusercontent.com/images/a.png" rel="icon" media="(prefers-color-scheme: light)">' +
+      '<link rel="apple-touch-icon" href="https://framerusercontent.com/images/b.png">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([
+      'https://framerusercontent.com/images/a.png',
+      'https://framerusercontent.com/images/b.png',
+    ]);
+  });
+
+  it('does not match an unrelated <link href> (stylesheet, canonical, preload)', () => {
+    const html =
+      '<link rel="stylesheet" href="https://cdn.example.com/style.css">' +
+      '<link rel="canonical" href="https://cdn.example.com/page">' +
+      '<link rel="preload" as="font" href="https://cdn.example.com/font.woff2">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([]);
+  });
 });
 
 describe('rawFileNameForRoute', () => {
