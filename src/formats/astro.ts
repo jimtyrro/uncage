@@ -77,6 +77,76 @@ function detectPromoWidgetClass($: cheerio.CheerioAPI): string | null {
   return classAttr.split(/\s+/).filter(Boolean)[0] || null;
 }
 
+/**
+ * Core logic of the SplitText duplicate-DOM runtime guard (see its call
+ * site in `compile()` for the full incident writeup). Exported and kept as
+ * a plain, typed function so it can be unit-tested directly against a
+ * lightweight fake DOM without a real browser -- the actual runtime guard
+ * embeds this exact function's source via `.toString()` into the injected
+ * `<script>` tag, so a passing unit test here is a guarantee about the
+ * shipped behavior, not a parallel reimplementation that could drift out
+ * of sync with it.
+ *
+ * The artifact is RECURSIVE SELF-NESTING, not sibling duplication: when
+ * the re-split runs against an element it already split before (without
+ * reverting first), it reads that element's existing content -- which is
+ * itself a whole `<span class="…word1">` (or `…letter1`, `…letter1-mask`)
+ * subtree -- and wraps THAT as if it were plain text, producing a second,
+ * fresh copy of the exact same wrapper class nested a few levels inside
+ * the first one (confirmed live on linoxa: outer, stuck
+ * `gsap_split_letter1` directly contains, as its only descendant chain,
+ * another element with the identical class `gsap_split_letter1`,
+ * correctly revealed, several levels deeper). A plain sibling-duplicate
+ * scan never finds this, because the two copies aren't siblings.
+ *
+ * Detected by walking down an element's *single-child* descent chain
+ * (deliberately only through nodes with exactly one child -- a real
+ * branch, e.g. a word's several sibling letters, immediately stops the
+ * walk) looking for a descendant whose class attribute is IDENTICAL,
+ * character-for-character, to the element it started from. An exact
+ * full-class match this deep in an unbroken single-child chain has no
+ * innocent explanation -- it's always this self-nesting artifact, never
+ * legitimate content (real markup doesn't wrap an element in a chain of
+ * single-purpose wrappers that ends in its own exact twin). When found,
+ * the OUTER element is replaced by the matched inner one, discarding the
+ * redundant wrapper chain between them; recursion then continues from
+ * the promoted element in case of a triple (or deeper) re-split.
+ *
+ * The entry check is deliberately gated on `el.children.length === 1`:
+ * only single-child elements are candidates for *being* a self-nested
+ * wrapper. A word span with several sibling letters is never itself
+ * self-nested (each of ITS letters might independently be, and gets
+ * checked on its own recursive visit) -- without this gate, an early
+ * prototype anchored the search on a multi-child word's arbitrary first
+ * child, found a match belonging to only that one letter, and hoisted it
+ * to replace the whole word, silently deleting that word's other
+ * letters. Scoping to classes containing "split" keeps this from ever
+ * touching unrelated single-child wrapper chains elsewhere on a page.
+ */
+export function collapseSelfNestedSplit(el: { nodeType: number; className: string; children: ArrayLike<any>; parentNode: { replaceChild(next: any, prev: any): void } | null } | null | undefined): void {
+  if (!el || el.nodeType !== 1) return;
+  if (el.children.length === 1) {
+    const cls = el.className;
+    if (typeof cls === 'string' && cls && /split/i.test(cls) && /[0-9]+(-[a-z]+)?(\s|$)/i.test(cls)) {
+      let cur = el.children[0];
+      let depth = 0;
+      while (cur && cur.children.length === 1 && depth < 20) {
+        if (cur.className === cls) break;
+        cur = cur.children[0];
+        depth++;
+      }
+      if (cur && cur.className === cls && el.parentNode) {
+        el.parentNode.replaceChild(cur, el);
+        collapseSelfNestedSplit(cur);
+        return;
+      }
+    }
+  }
+  for (const child of Array.prototype.slice.call(el.children)) {
+    collapseSelfNestedSplit(child);
+  }
+}
+
 export const astroStrategy: ExporterStrategy = {
   name: 'Astro',
   format: 'astro',
@@ -357,6 +427,35 @@ export const astroStrategy: ExporterStrategy = {
       // right when it would have settled on its own anyway.
       const stuckTransformGuard = `<script is:inline>(function(){function fix(el){var s=el.getAttribute('style')||'';if(s.indexOf('translate: none')===-1)return;if(s.indexOf('opacity: 1')===-1)return;var m=s.match(/transform:\\s*translate\\([\\d.]+%,\\s*-?[\\d.]+%\\)\\s*(translate3d\\([^)]*\\))/);if(!m)return;var c=m[1].match(/translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*([-\\d.]+)px\\)/);if(!c)return;if(Math.abs(parseFloat(c[1]))>2||Math.abs(parseFloat(c[2]))>2)return;el.style.transform=m[1]}function scan(){document.querySelectorAll('[style*="translate: none"]').forEach(fix)}scan();new MutationObserver(function(records){records.forEach(function(r){if(r.target.nodeType===1)fix(r.target)})}).observe(document.documentElement,{attributes:true,attributeFilter:['style'],subtree:true})})();</script>`;
       html = html.replace('<head>', '<head>' + stuckTransformGuard);
+
+      // A DIFFERENT runtime artifact from the stuck-transform guard above:
+      // some scroll/reflow-driven JS re-runs a text-splitting effect
+      // (confirmed live: Webflow's own GSAP SplitText integration,
+      // triggered on scroll) against an element it already split before,
+      // without reverting first -- see `collapseSelfNestedSplit`'s doc
+      // comment above for the full incident writeup and why this is
+      // recursive self-nesting, not sibling duplication. Confirmed on
+      // linoxa's home-one footer ("Stay connected with us",
+      // "Architecture"): the live site settles to one
+      // <span class="gsap_split_letter3"> per letter after scrolling to
+      // it; the captured export settles to a nested nest of nearly
+      // identical wrappers around it, every time, on a completely fresh
+      // page load -- deterministic, not a byproduct of repeated testing
+      // or a flaky download (confirmed via two independent from-scratch
+      // crawls producing byte-identical JS assets, both reproducing the
+      // exact same runtime duplication). Confirmed NOT baked into the
+      // static export itself (the generated .astro source has exactly
+      // one span per letter); this is the site's own bundled JS
+      // re-splitting live, for reasons specific to this export's load
+      // timing that nothing here can fix at the source. Visually:
+      // roughly half a split-text heading's letters render permanently
+      // invisible/offset, reading as a color/contrast bug rather than
+      // the doubled, half-broken DOM it actually is.
+      //
+      // Patched with a MutationObserver running `collapseSelfNestedSplit`
+      // on every element whose children changed.
+      const splitDupeGuard = `<script is:inline>(function(){var collapse=${collapseSelfNestedSplit.toString()};new MutationObserver(function(records){var targets=new Set();records.forEach(function(r){if(r.type==='childList')targets.add(r.target)});targets.forEach(collapse)}).observe(document.documentElement,{childList:true,subtree:true})})();</script>`;
+      html = html.replace('<head>', '<head>' + splitDupeGuard);
 
       // Frontmatter imports for the CSS blocks Pass 1 pulled out of this
       // page, in their ORIGINAL tag order (not grouped by scope) -- a page

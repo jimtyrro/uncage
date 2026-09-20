@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { astroStrategy, routeToAstroFilename } from './astro.js';
+import { astroStrategy, routeToAstroFilename, collapseSelfNestedSplit } from './astro.js';
 
 describe('Astro format: curly-brace escaping in text content', () => {
   const tmpDirs: string[] = [];
@@ -294,5 +294,153 @@ describe('Astro format: resolves Framer relative hrefs to absolute paths', () =>
     expect(astro).toContain('href="mailto:hello@example.com"');
     expect(astro).toContain('href="tel:+1234567890"');
     expect(astro).toContain('href="#section"');
+  });
+});
+
+describe('Astro format: collapseSelfNestedSplit (SplitText duplicate-DOM runtime guard)', () => {
+  // A minimal fake DOM: just enough surface (nodeType, className,
+  // children, parentNode.replaceChild) for collapseSelfNestedSplit to
+  // operate on, without needing a real browser or jsdom. This is the
+  // exact function embedded verbatim (via .toString()) into the shipped
+  // runtime guard script -- these tests exercise the real, shipped logic.
+  class FakeElement {
+    nodeType = 1;
+    className: string;
+    children: FakeElement[] = [];
+    parentNode: { replaceChild(next: FakeElement, prev: FakeElement): void } | null = null;
+    text?: string;
+    constructor(className: string, text?: string) {
+      this.className = className;
+      if (text !== undefined) this.text = text;
+    }
+  }
+
+  function attach(parent: FakeElement, child: FakeElement): FakeElement {
+    child.parentNode = {
+      replaceChild: (next, prev) => {
+        const idx = parent.children.indexOf(prev);
+        if (idx !== -1) parent.children[idx] = next;
+        next.parentNode = prev.parentNode;
+      },
+    };
+    parent.children.push(child);
+    return child;
+  }
+
+  // Builds a chain of single-child wrapper elements, outermost first,
+  // matching the real shape a re-split produces: an outer element (stuck
+  // pre-reveal) whose single-child descent chain leads to an inner
+  // element sharing the OUTER's exact class (correctly revealed).
+  function selfNestedChain(outerClass: string, innerWrapperClasses: string[], leafText: string): FakeElement {
+    const outer = new FakeElement(outerClass);
+    let cur = outer;
+    for (const cls of innerWrapperClasses) {
+      cur = attach(cur, new FakeElement(cls));
+    }
+    attach(cur, new FakeElement(outerClass, leafText)); // the matching inner twin
+    return outer;
+  }
+
+  it('collapses a self-nested letter (real linoxa bug: re-split wrapped its own prior output)', () => {
+    // Reproduces the real, confirmed-live structure: outer letter1 (stuck
+    // pre-reveal) has, as its only descendant chain, a fresh word1 >
+    // letter1-mask > letter1 (revealed) -- the re-split treated the
+    // already-split "S" content as plain text and wrapped it again.
+    const outer = selfNestedChain(
+      'gsap_split_letter gsap_split_letter1',
+      ['gsap_split_word gsap_split_word1', 'gsap_split_letter-mask gsap_split_letter1-mask'],
+      'S'
+    );
+    const root = new FakeElement('root');
+    attach(root, outer);
+
+    collapseSelfNestedSplit(root);
+
+    expect(root.children.length).toBe(1);
+    expect(root.children[0]!.className).toBe('gsap_split_letter gsap_split_letter1');
+    // The kept element is the INNER (revealed) twin, not the outer wrapper chain.
+    expect(root.children[0]!.text).toBe('S');
+  });
+
+  it('collapses each letter of a full word independently, without discarding sibling letters', () => {
+    // The real bug in an earlier version of this fix: anchoring the
+    // search on a multi-child word's arbitrary first child found a match
+    // belonging to only that one letter, and hoisted it to replace the
+    // WHOLE word -- silently deleting the word's other letters. A word
+    // has several sibling letter-masks; each is independently self-nested
+    // (or not) and must be resolved on its own.
+    const word = new FakeElement('gsap_split_word gsap_split_word1');
+    const letters = ['S', 't', 'a', 'y'];
+    for (let i = 0; i < letters.length; i++) {
+      const maskClass = `gsap_split_letter-mask gsap_split_letter${i + 1}-mask`;
+      const mask = selfNestedChain(maskClass, ['gsap_split_letter gsap_split_letter' + (i + 1)], letters[i]!);
+      attach(word, mask);
+    }
+
+    collapseSelfNestedSplit(word);
+
+    expect(word.children.length).toBe(4);
+    expect(word.children.map((c) => c.text)).toEqual(['S', 't', 'a', 'y']);
+  });
+
+  it('does NOT touch legitimate single-child wrapper chains unrelated to "split" (e.g. an icon-in-button wrapper)', () => {
+    const outer = new FakeElement('btn-icon-wrap');
+    const inner = attach(outer, new FakeElement('btn-icon-wrap'));
+    attach(inner, new FakeElement('svg-icon', 'icon'));
+    const root = new FakeElement('root');
+    attach(root, outer);
+
+    collapseSelfNestedSplit(root);
+
+    // Unchanged -- no "split" in the class name, even though the shape
+    // (single-child chain ending in an identical class) looks similar.
+    expect(root.children[0]).toBe(outer);
+  });
+
+  it('does NOT touch a branching (multi-child) split element -- only single-child wrapper chains are candidates', () => {
+    // A word with several distinct sibling letters (no duplication) must
+    // never be treated as self-nested just because it contains "split"
+    // and a numbered class.
+    const word = new FakeElement('gsap_split_word gsap_split_word1');
+    attach(word, new FakeElement('gsap_split_letter gsap_split_letter1', 'S'));
+    attach(word, new FakeElement('gsap_split_letter gsap_split_letter2', 't'));
+    const root = new FakeElement('root');
+    attach(root, word);
+
+    collapseSelfNestedSplit(root);
+
+    expect(root.children[0]).toBe(word);
+    expect(word.children.length).toBe(2);
+  });
+
+  it('does NOT touch a normal, non-duplicated split heading (no nested twin anywhere in the chain)', () => {
+    const letter = new FakeElement('gsap_split_letter gsap_split_letter1');
+    attach(letter, new FakeElement('plain-text-node', 'S'));
+    const root = new FakeElement('root');
+    attach(root, letter);
+
+    collapseSelfNestedSplit(root);
+
+    expect(root.children[0]).toBe(letter);
+  });
+});
+
+describe('Astro format: SplitText duplicate-DOM guard script wiring', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  it('injects the collapseSelfNestedSplit guard into every compiled page', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-splitguard-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': '<!DOCTYPE html><html><head></head><body></body></html>' });
+    const astro = await fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+
+    // The embedded function source must actually be present (proves the
+    // .toString() embedding, not just some unrelated guard script).
+    expect(astro).toContain('collapseSelfNestedSplit');
+    expect(astro).toContain('MutationObserver');
   });
 });
