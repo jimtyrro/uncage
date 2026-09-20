@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rewriteHtml, rawFileNameForRoute, globToRegExp, shouldFetchUrl, extractCssReferencedUrls } from './extractor.js';
+import { rewriteHtml, rawFileNameForRoute, globToRegExp, shouldFetchUrl, extractCssReferencedUrls, extractHtmlReferencedUrls } from './extractor.js';
 
 describe('rewriteHtml asset URL rewriting', () => {
   it('rewrites a query-string URL containing & when HTML-encoded as &amp;', () => {
@@ -90,6 +90,43 @@ describe('extractCssReferencedUrls', () => {
       'https://cdn.example.com/a.png',
       'https://cdn.example.com/b.png',
     ]);
+  });
+});
+
+describe('extractHtmlReferencedUrls', () => {
+  it('finds an absolute src attribute', () => {
+    const html = '<img src="https://cdn.example.com/avatar.webp">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([
+      'https://cdn.example.com/avatar.webp',
+    ]);
+  });
+
+  it('resolves a root-relative src against the page URL', () => {
+    const html = '<img src="/assets/x.webp">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/blog/post')).toEqual([
+      'https://cdn.example.com/assets/x.webp',
+    ]);
+  });
+
+  it('finds a poster attribute (video carousel/testimonial pattern)', () => {
+    const html = '<video poster="https://cdn.example.com/thumb.jpg" src="https://cdn.example.com/v.mp4"></video>';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([
+      'https://cdn.example.com/thumb.jpg',
+      'https://cdn.example.com/v.mp4',
+    ]);
+  });
+
+  it('extracts every URL out of a srcset, ignoring the descriptor', () => {
+    const html = '<img srcset="https://cdn.example.com/a.webp 1x, https://cdn.example.com/b.webp 2x">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([
+      'https://cdn.example.com/a.webp',
+      'https://cdn.example.com/b.webp',
+    ]);
+  });
+
+  it('skips data: URLs', () => {
+    const html = '<img src="data:image/png;base64,AAAA">';
+    expect(extractHtmlReferencedUrls(html, 'https://cdn.example.com/page')).toEqual([]);
   });
 });
 

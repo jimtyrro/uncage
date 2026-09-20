@@ -1069,21 +1069,56 @@ export function extractCssReferencedUrls(cssText: string, contextUrl: string): s
   return found;
 }
 
-// Backfill for assets that exist only as a CSS `url()` reference the real
+// Pure scan for every asset reference in HTML attributes that carry a URL
+// (src, srcset, poster) -- the raw-HTML counterpart to
+// extractCssReferencedUrls. Same rationale, different attack surface:
+// confirmed live on tripora, `<img>` tags belonging to a carousel/
+// testimonial widget whose non-active slides are only ever attached to
+// the DOM (with a real src) once that slide becomes current, so a static
+// crawl of every page still never causes the browser to request them.
+// srcset is comma-separated URL+descriptor pairs (`url 2x, url2 3x`);
+// each URL is extracted independently.
+export function extractHtmlReferencedUrls(html: string, pageUrl: string): string[] {
+  const found: string[] = [];
+  const resolve = (raw: string) => {
+    if (!raw || raw.startsWith('data:')) return;
+    try {
+      found.push(new URL(raw, pageUrl).href);
+    } catch {}
+  };
+
+  const attrRe = /\b(?:src|poster)\s*=\s*["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = attrRe.exec(html))) resolve(m[1]!);
+
+  const srcsetRe = /\bsrcset\s*=\s*["']([^"']+)["']/gi;
+  while ((m = srcsetRe.exec(html))) {
+    for (const entry of m[1]!.split(',')) {
+      const url = entry.trim().split(/\s+/)[0];
+      if (url) resolve(url);
+    }
+  }
+
+  return found;
+}
+
+// Backfill for assets referenced only in markup or CSS that the real
 // browser crawl never actually requested. Every other asset in this tool
 // is discovered by letting a real page load and intercepting whatever the
 // browser decides to fetch (see the route handler above) -- which is
-// right for anything JS-driven, but misses a CSS rule that's syntactically
-// present yet never active on any crawled page: confirmed live on linoxa,
-// where `.rt-cover-image.rt-parallax.rt-image-v12/14/15` (a portfolio
-// widget's per-slide classes, only ever attached to the DOM element
-// currently showing) and `.w-checkbox-input...w--redirected-checked` (a
-// real `:checked` interactive state no static crawl can trigger) both
-// reference real images that a full crawl of all 45 pages still never
-// caused the browser to request. Scoped to images/fonts/media -- CSS, JS,
-// and JSON assets are already covered by the browser-driven path and its
-// own transitive-dependency chaser (downloadMissingDeps), and giving this
-// pass the same scope would just duplicate that work.
+// right for anything JS-driven, but misses a rule or tag that's
+// syntactically present yet never active/rendered on any crawled page.
+// Confirmed live on two different sites: linoxa's
+// `.rt-cover-image.rt-parallax.rt-image-v12/14/15` (a portfolio widget's
+// per-slide CSS classes, only ever attached to the DOM element currently
+// showing) and `.w-checkbox-input...w--redirected-checked` (a real
+// `:checked` interactive state no static crawl can trigger); tripora's
+// carousel/testimonial `<img>` tags, whose non-active slides are only
+// ever given a real `src` once that slide becomes current. Scoped to
+// images/fonts/media -- CSS, JS, and JSON assets are already covered by
+// the browser-driven path and its own transitive-dependency chaser
+// (downloadMissingDeps), and giving this pass the same scope would just
+// duplicate that work.
 export async function backfillCssReferencedAssets(
   pageFiles: Record<string, string>,
   cssDir: string,
@@ -1117,7 +1152,8 @@ export async function backfillCssReferencedAssets(
     for (const url of extractCssReferencedUrls(content, cssRemoteUrl)) candidates.set(url, undefined);
   }
 
-  // 2. Inline <style> blocks inside every captured raw page.
+  // 2. Inline <style> blocks, and 3. src/srcset/poster attributes, inside
+  // every captured raw page.
   for (const [route, rawFilePath] of Object.entries(pageFiles)) {
     const routePath = route === '/index' ? '/' : route;
     const pageUrl = `${baseOrigin}${routePath}`;
@@ -1132,6 +1168,7 @@ export async function backfillCssReferencedAssets(
     while ((sm = styleRe.exec(html))) {
       for (const url of extractCssReferencedUrls(sm[1]!, pageUrl)) candidates.set(url, undefined);
     }
+    for (const url of extractHtmlReferencedUrls(html, pageUrl)) candidates.set(url, undefined);
   }
 
   const MAX_BYTES = 25 * 1024 * 1024;
