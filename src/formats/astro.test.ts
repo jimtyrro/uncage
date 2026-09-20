@@ -541,6 +541,27 @@ describe('Astro format: uncage-runtime widget injection', () => {
     expect(scriptIdx).toBeGreaterThan(fakeBodyIdx);
     expect(scriptIdx).toBeLessThan(realBodyCloseIdx);
   });
+
+  it('injects into <body> even when a comment AFTER </body> contains the text </body>', async () => {
+    // The case that defeats a lastIndexOf('</body>') string splice, and
+    // the reason this injection goes through cheerio instead. Stray text
+    // and trailing <script> tags after </body> both get hoisted into
+    // <body> by the parser, but a COMMENT is preserved exactly where it
+    // sits -- so the last literal '</body>' in the serialized output can
+    // legitimately be inside that trailing comment, and a string splice
+    // would bury the widget scripts in it (dead, never executed).
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '</body><!-- deploy note: paste the snippet before </body> --></html>';
+    const { astro } = await compilePage(html);
+    const scriptIdx = astro.indexOf('uncage-runtime/carousel.js');
+    const commentIdx = astro.indexOf('deploy note');
+    expect(scriptIdx).toBeGreaterThan(0);
+    // Script must land before the trailing comment, i.e. inside the real
+    // body -- not after it, which is where the string approach put it.
+    expect(scriptIdx).toBeLessThan(commentIdx);
+  });
 });
 
 describe('Astro format: strip Framer/Webflow hydration JS', () => {
