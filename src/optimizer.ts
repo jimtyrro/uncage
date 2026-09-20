@@ -35,7 +35,14 @@ export async function optimizeExtractedCss(outputDir: string, pages: Record<stri
 
         if (purgeResult && purgeResult[0]) {
           const purgedCss = purgeResult[0].css;
-          const result = await postcss([cssnano()]).process(purgedCss, { from: filePath, to: filePath });
+          // normalizeUrl: false -- confirmed live on linoxa: cssnano's
+          // default url() normalization turns backslash-escaped characters
+          // into forward slashes (`image\(3\).webp` -> `image/(3/).webp`),
+          // corrupting any url() this pass didn't already localize into a
+          // permanently invalid one, remote or local. Verified in isolation
+          // that PurgeCSS (run just above) leaves the same escaping intact;
+          // cssnano alone is the corrupting step.
+          const result = await postcss([cssnano({ preset: ['default', { normalizeUrl: false }] })]).process(purgedCss, { from: filePath, to: filePath });
           await fs.writeFile(filePath, result.css);
         }
       } catch (e: any) {

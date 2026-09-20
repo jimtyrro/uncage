@@ -179,6 +179,24 @@ export function rawFileNameForRoute(route: string): string {
   return `captured-raw-${safeRoute}-${hash}.html`;
 }
 
+// Content of a CSS url(...) token, escape-aware: `(?:\\.|[^"')])+` treats a
+// backslash-escaped character (\X, any X) as a single unit, so a filename
+// like `image\(3\).webp` -- Webflow's real captured escaping for a source
+// filename containing literal parens -- doesn't get truncated at the first
+// escaped `)`. A plain `[^"')]+` class (what every url() regex here used to
+// use) stops there, silently producing a mangled, undownloadable URL; this
+// is why `image (3).webp` was missing from a real linoxa capture while
+// every other asset on the page downloaded fine. CSS's url() grammar
+// requires backslash-escaping exactly the characters that would otherwise
+// end the token early -- parens, quotes, whitespace -- so any capture
+// mixing that with the assetMap's browser-resolved keys (which have the
+// escapes already decoded, since that's what the browser actually
+// requested) needs `unescapeCssUrl` before the lookup.
+const CSS_URL_CONTENT = '(?:\\\\.|[^"\')])+';
+function unescapeCssUrl(s: string): string {
+  return s.replace(/\\(.)/g, '$1');
+}
+
 // Patterns for Framer runtime bundles that power animations (module-level so both
 // the crawl-phase route handler and the post-crawl dependency scanner can use it)
 const RUNTIME_PATTERNS = [
@@ -733,6 +751,16 @@ await new Promise(r => setTimeout(r, 300));
     }
 
 
+    // Backfill CSS-only-referenced assets (see backfillCssReferencedAssets'
+    // doc comment) before any rewriting happens, so the passes below see a
+    // complete assetMap and localize these the same way as everything else.
+    console.log('  [3.5/5] Backfilling CSS-referenced assets the crawl never requested...');
+    report('phase', 'Backfilling CSS-referenced assets');
+    const backfilled = await backfillCssReferencedAssets(pageFiles, cssDir, imgDir, fontDir, mediaDir, assetMap, baseOrigin, allowUrls, blockUrls);
+    if (backfilled > 0) {
+      console.log(`        Downloaded ${backfilled} asset(s) referenced only by CSS`);
+    }
+
     console.log(`  [4/5] Rewriting asset URLs for ${Object.keys(pageFiles).length} pages...`);
     report('phase', 'Rewriting asset URLs');
 
@@ -918,23 +946,32 @@ export function rewriteHtml(html: string, pageUrl: string, assetMap: AssetMap, b
       return `${prefix}${rewrittenEntries.join(', ')}${suffix}`;
     });
 
-    // 4. Rewrite inline CSS url()
-    result = result.replace(/url\(["']?(https?:\/\/[^"')]+)["']?\)/g, (match, remoteUrl) => {
-      return assetMap[remoteUrl] ? `url("${assetMap[remoteUrl]}")` : match;
+    // 4. Rewrite inline CSS url(). Escape-aware (CSS_URL_CONTENT, see top of
+    // file) so a captured filename like `image\(3\).webp` isn't truncated
+    // at the first escaped `)` -- unescapeCssUrl() then strips the
+    // backslashes before the assetMap lookup, since assetMap's keys are the
+    // browser's own already-decoded request URLs.
+    result = result.replace(new RegExp(`url\\(["']?(https?:\\/\\/${CSS_URL_CONTENT})["']?\\)`, 'g'), (match, remoteUrl) => {
+      const unescaped = unescapeCssUrl(remoteUrl);
+      return assetMap[unescaped] ? `url("${assetMap[unescaped]}")` : (assetMap[remoteUrl] ? `url("${assetMap[remoteUrl]}")` : match);
     });
-    result = result.replace(/url\(["']?(\/[^"')]+)["']?\)/g, (match, rootPath) => {
-      const fullUrl = `${baseOrigin}${rootPath.startsWith('/') ? rootPath : '/' + rootPath}`;
+    result = result.replace(new RegExp(`url\\(["']?(\\/${CSS_URL_CONTENT})["']?\\)`, 'g'), (match, rootPath) => {
+      const unescaped = unescapeCssUrl(rootPath);
+      const fullUrl = `${baseOrigin}${unescaped.startsWith('/') ? unescaped : '/' + unescaped}`;
       return assetMap[fullUrl] ? `url("${assetMap[fullUrl]}")` : match;
     });
-    result = result.replace(/url\(\s*["']?(?!data:|https?:|\/\/|\/)(\.\.?\/[^"')]+|[^"')\s/][^"')]+)["']?\s*\)/g, (match, relPath) => {
-      try {
-        const resolved = new URL(relPath, pageUrl).href;
-        if (assetMap[resolved]) return `url("${assetMap[resolved]}")`;
-        const noQuery = resolved.split('?')[0];
-        if (noQuery && assetMap[noQuery]) return `url("${assetMap[noQuery]}")`;
-      } catch {}
-      return match;
-    });
+    result = result.replace(
+      new RegExp(`url\\(\\s*["']?(?!data:|https?:|\\/\\/|\\/)(\\.\\.?\\/${CSS_URL_CONTENT}|[^"')\\s/]${CSS_URL_CONTENT})["']?\\s*\\)`, 'g'),
+      (match, relPath) => {
+        try {
+          const resolved = new URL(unescapeCssUrl(relPath), pageUrl).href;
+          if (assetMap[resolved]) return `url("${assetMap[resolved]}")`;
+          const noQuery = resolved.split('?')[0];
+          if (noQuery && assetMap[noQuery]) return `url("${assetMap[noQuery]}")`;
+        } catch {}
+        return match;
+      }
+    );
 
     // Restore protected inline script contents
     result = result.replace(/__UNCAGE_SCRIPT_CONTENT_(\d+)__/g, (_, idx) => {
@@ -962,9 +999,22 @@ async function rewriteCssFiles(cssDir: string, assetMap: AssetMap, baseOrigin: s
         content = content.replace(new RegExp(escaped, 'g'), localPath);
       }
 
+      // Rewrite absolute https?:// url() in CSS. The exact-match loop above
+      // (built from literal assetMap keys) misses any URL whose CSS text
+      // uses backslash-escaping the assetMap key doesn't have -- assetMap
+      // keys are the browser's own already-decoded request URLs, so
+      // `image\(3\).webp` in the text never literally matches the key
+      // `image(3).webp`. This regex is escape-aware and unescapes before
+      // the lookup, same as the equivalent pass in rewriteHtml.
+      content = content.replace(new RegExp(`url\\(\\s*["']?(https?:\\/\\/${CSS_URL_CONTENT})["']?\\s*\\)`, 'g'), (match, remoteUrl) => {
+        const unescaped = unescapeCssUrl(remoteUrl);
+        return assetMap[unescaped] ? `url("${assetMap[unescaped]}")` : (assetMap[remoteUrl] ? `url("${assetMap[remoteUrl]}")` : match);
+      });
+
       // Rewrite root-relative url(/...) in CSS
-      content = content.replace(/url\(\s*["']?(\/[^"')]+)["']?\s*\)/g, (match, rootPath) => {
-        const fullUrl = `${baseOrigin}${rootPath.startsWith('/') ? rootPath : '/' + rootPath}`;
+      content = content.replace(new RegExp(`url\\(\\s*["']?(\\/${CSS_URL_CONTENT})["']?\\s*\\)`, 'g'), (match, rootPath) => {
+        const unescaped = unescapeCssUrl(rootPath);
+        const fullUrl = `${baseOrigin}${unescaped.startsWith('/') ? unescaped : '/' + unescaped}`;
         return assetMap[fullUrl] ? `url("${assetMap[fullUrl]}")` : match;
       });
 
@@ -972,25 +1022,203 @@ async function rewriteCssFiles(cssDir: string, assetMap: AssetMap, baseOrigin: s
       const cssAssetEntry = Object.entries(assetMap).find(([, local]) => local && path.basename(local) === file);
       const cssRemoteUrl = cssAssetEntry ? cssAssetEntry[0] : null;
       if (cssRemoteUrl) {
-        content = content.replace(/url\(\s*["']?(?!data:|https?:|\/\/|\/)(\.\.?\/[^"')]+|[^"')\s/][^"')]+)["']?\s*\)/g, (match, relPath) => {
-          try {
-            const resolvedUrl = new URL(relPath, cssRemoteUrl).href;
-            if (assetMap[resolvedUrl]) {
-              return `url("${assetMap[resolvedUrl]}")`;
-            }
-            // Try without query string
-            const noQuery = resolvedUrl.split('?')[0];
-            if (noQuery && assetMap[noQuery]) {
-              return `url("${assetMap[noQuery]}")`;
-            }
-          } catch {}
-          return match;
-        });
+        content = content.replace(
+          new RegExp(`url\\(\\s*["']?(?!data:|https?:|\\/\\/|\\/)(\\.\\.?\\/${CSS_URL_CONTENT}|[^"')\\s/]${CSS_URL_CONTENT})["']?\\s*\\)`, 'g'),
+          (match, relPath) => {
+            try {
+              const resolvedUrl = new URL(unescapeCssUrl(relPath), cssRemoteUrl).href;
+              if (assetMap[resolvedUrl]) {
+                return `url("${assetMap[resolvedUrl]}")`;
+              }
+              // Try without query string
+              const noQuery = resolvedUrl.split('?')[0];
+              if (noQuery && assetMap[noQuery]) {
+                return `url("${assetMap[noQuery]}")`;
+              }
+            } catch {}
+            return match;
+          }
+        );
       }
 
       await fs.writeFile(filePath, content);
     }
   });
+}
+
+// Pure, escape-aware scan for every url(...) reference in a block of CSS
+// text, resolved against contextUrl (the CSS file's own remote URL, or a
+// page's URL for an inline <style> block). Exported and kept side-effect
+// free specifically so it's unit-testable without touching the filesystem
+// or network -- the I/O (which files to scan, what to fetch) lives in
+// backfillCssReferencedAssets below.
+export function extractCssReferencedUrls(cssText: string, contextUrl: string): string[] {
+  const found: string[] = [];
+  const re = new RegExp(`url\\(\\s*["']?(${CSS_URL_CONTENT})["']?\\s*\\)`, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cssText))) {
+    const raw = unescapeCssUrl(m[1]!);
+    if (raw.startsWith('data:')) continue;
+    try {
+      found.push(new URL(raw, contextUrl).href);
+    } catch {
+      // Not a resolvable URL (e.g. a CSS custom property reference some
+      // build tools leave inside url() as var(...)) -- skip, not fetchable.
+    }
+  }
+  return found;
+}
+
+// Backfill for assets that exist only as a CSS `url()` reference the real
+// browser crawl never actually requested. Every other asset in this tool
+// is discovered by letting a real page load and intercepting whatever the
+// browser decides to fetch (see the route handler above) -- which is
+// right for anything JS-driven, but misses a CSS rule that's syntactically
+// present yet never active on any crawled page: confirmed live on linoxa,
+// where `.rt-cover-image.rt-parallax.rt-image-v12/14/15` (a portfolio
+// widget's per-slide classes, only ever attached to the DOM element
+// currently showing) and `.w-checkbox-input...w--redirected-checked` (a
+// real `:checked` interactive state no static crawl can trigger) both
+// reference real images that a full crawl of all 45 pages still never
+// caused the browser to request. Scoped to images/fonts/media -- CSS, JS,
+// and JSON assets are already covered by the browser-driven path and its
+// own transitive-dependency chaser (downloadMissingDeps), and giving this
+// pass the same scope would just duplicate that work.
+export async function backfillCssReferencedAssets(
+  pageFiles: Record<string, string>,
+  cssDir: string,
+  imgDir: string,
+  fontDir: string,
+  mediaDir: string,
+  assetMap: AssetMap,
+  baseOrigin: string,
+  allowUrls: string[] = [],
+  blockUrls: string[] = []
+): Promise<number> {
+  const candidates = new Map<string, void>();
+
+  // 1. Every external CSS file already downloaded during the crawl.
+  let cssFiles: string[] = [];
+  try {
+    cssFiles = await fs.readdir(cssDir);
+  } catch {}
+  for (const file of cssFiles) {
+    if (!file.endsWith('.css')) continue;
+    let content: string;
+    try {
+      content = await fs.readFile(path.join(cssDir, file), 'utf-8');
+    } catch {
+      continue;
+    }
+    // Resolve this file's own remote source URL (for relative refs inside
+    // it), same lookup rewriteCssFiles uses to stay consistent.
+    const cssEntry = Object.entries(assetMap).find(([, local]) => local && path.basename(local) === file);
+    const cssRemoteUrl = cssEntry ? cssEntry[0] : baseOrigin;
+    for (const url of extractCssReferencedUrls(content, cssRemoteUrl)) candidates.set(url, undefined);
+  }
+
+  // 2. Inline <style> blocks inside every captured raw page.
+  for (const [route, rawFilePath] of Object.entries(pageFiles)) {
+    const routePath = route === '/index' ? '/' : route;
+    const pageUrl = `${baseOrigin}${routePath}`;
+    let html: string;
+    try {
+      html = await fs.readFile(rawFilePath, 'utf-8');
+    } catch {
+      continue;
+    }
+    const styleRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+    let sm: RegExpExecArray | null;
+    while ((sm = styleRe.exec(html))) {
+      for (const url of extractCssReferencedUrls(sm[1]!, pageUrl)) candidates.set(url, undefined);
+    }
+  }
+
+  const MAX_BYTES = 25 * 1024 * 1024;
+  let downloaded = 0;
+
+  for (const remoteUrl of candidates.keys()) {
+    if (assetMap[remoteUrl]) continue;
+    if (!/^https?:\/\//i.test(remoteUrl)) continue;
+    if (!shouldFetchUrl(remoteUrl, allowUrls, blockUrls)) continue;
+
+    let success = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let transientFailure = false;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const res = await fetch(remoteUrl, {
+          signal: controller.signal,
+          headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            referer: baseOrigin + '/',
+          },
+        });
+
+        if (res.ok) {
+          const contentType = (res.headers.get('content-type') || '').toLowerCase();
+          const parsedUrl = new URL(remoteUrl);
+          const pathname = parsedUrl.pathname;
+
+          let targetDir: string | null = null;
+          if (contentType.startsWith('image/') || /\.(png|jpe?g|gif|svg|webp|avif|ico)$/i.test(pathname)) targetDir = imgDir;
+          else if (contentType.startsWith('font/') || /\.(woff2?|ttf|otf|eot)$/i.test(pathname)) targetDir = fontDir;
+          else if (
+            contentType.startsWith('video/') ||
+            contentType.startsWith('audio/') ||
+            /\.(mp4|webm|mp3|wav|ogg)$/i.test(pathname)
+          )
+            targetDir = mediaDir;
+
+          if (!targetDir) {
+            // Out of scope for this pass (see doc comment above) -- not a
+            // failure, just nothing for this backfill to do with it.
+            try {
+              await res.body?.cancel();
+            } catch {}
+            success = true;
+            break;
+          }
+
+          const buffer = Buffer.from(await res.arrayBuffer());
+          if (buffer.byteLength > MAX_BYTES) {
+            success = true;
+            break;
+          }
+
+          const rawName = path.basename(pathname) || 'asset';
+          const ext = guessExtension('image', contentType, rawName);
+          const urlHash = crypto.createHash('md5').update(remoteUrl).digest('hex').slice(0, 8);
+          let baseName = rawName.includes('.') ? rawName.substring(0, rawName.lastIndexOf('.')) : rawName;
+          baseName = sanitizeFileName(baseName) || 'asset';
+          const fileName = `${baseName}-${urlHash}${ext}`;
+
+          await fs.writeFile(path.join(targetDir, fileName), buffer);
+          assetMap[remoteUrl] = `/assets/${path.basename(targetDir)}/${fileName}`;
+          downloaded++;
+          success = true;
+          break;
+        } else {
+          try {
+            await res.body?.cancel();
+          } catch {}
+          transientFailure = res.status === 408 || res.status === 429 || res.status >= 500;
+        }
+      } catch {
+        transientFailure = true;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (success || !transientFailure) break;
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt - 1)));
+      }
+    }
+  }
+
+  return downloaded;
 }
 
 async function rewriteJsFiles(outputDir: string, assetMap: AssetMap, baseOrigin: string): Promise<Result<void, Error>> {
