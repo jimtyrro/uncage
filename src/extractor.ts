@@ -756,7 +756,10 @@ await new Promise(r => setTimeout(r, 300));
     // complete assetMap and localize these the same way as everything else.
     console.log('  [3.5/5] Backfilling CSS-referenced assets the crawl never requested...');
     report('phase', 'Backfilling CSS-referenced assets');
-    const backfilled = await backfillCssReferencedAssets(pageFiles, cssDir, imgDir, fontDir, mediaDir, assetMap, baseOrigin, allowUrls, blockUrls);
+    const backfilled = await backfillCssReferencedAssets(
+      pageFiles, cssDir, imgDir, fontDir, mediaDir, assetMap, baseOrigin, allowUrls, blockUrls,
+      originalHead ? { html: originalHead, contextUrl: headSourceUrl || baseOrigin } : undefined
+    );
     if (backfilled > 0) {
       console.log(`        Downloaded ${backfilled} asset(s) referenced only by CSS`);
     }
@@ -1146,7 +1149,8 @@ export async function backfillCssReferencedAssets(
   assetMap: AssetMap,
   baseOrigin: string,
   allowUrls: string[] = [],
-  blockUrls: string[] = []
+  blockUrls: string[] = [],
+  sharedHead?: { html: string; contextUrl: string }
 ): Promise<number> {
   const candidates = new Map<string, void>();
 
@@ -1187,6 +1191,14 @@ export async function backfillCssReferencedAssets(
       for (const url of extractCssReferencedUrls(sm[1]!, pageUrl)) candidates.set(url, undefined);
     }
     for (const url of extractHtmlReferencedUrls(html, pageUrl)) candidates.set(url, undefined);
+  }
+
+  // 4. The <head> block some captures keep separate from pageFiles
+  // entirely (see the doc comment above): a real, confirmed miss on
+  // tripora, where every page's favicon links live only here, so this
+  // pass silently never saw them even after every page had been scanned.
+  if (sharedHead?.html) {
+    for (const url of extractHtmlReferencedUrls(sharedHead.html, sharedHead.contextUrl)) candidates.set(url, undefined);
   }
 
   const MAX_BYTES = 25 * 1024 * 1024;
