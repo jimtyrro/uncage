@@ -629,11 +629,32 @@ export const astroStrategy: ExporterStrategy = {
       // page's own nesting depth. Placed at the end of <body> so the
       // widget markup they target already exists in the DOM by the time
       // each script runs.
+      //
+      // Uses the LAST `</body>` occurrence, not a naive first-match
+      // replace -- real bug found live on a Webflow template (linoxa)
+      // bundling a third-party promo widget ("radiant-vault") whose own
+      // embedded script carries a developer-instructions comment that
+      // itself contains the literal text `</body>` as an example
+      // (documenting where a site owner should paste an embed snippet).
+      // A plain `.replace('</body>', ...)` matches that fake occurrence
+      // first, splicing these widget scripts into the middle of inert
+      // third-party comment text instead of the page's real closing
+      // tag -- which then leaves the ACTUAL `</body>` untouched later in
+      // the document, producing two `</body>` tags for one `<body>` and
+      // failing Astro's compiler with "Closing tag has no matching
+      // opening tag". The real closing tag is always the LAST such
+      // occurrence in a well-formed document (nothing valid follows it
+      // except `</html>`), so `lastIndexOf` is the reliable target
+      // regardless of what fake `</body>`-looking text a third-party
+      // script's own content happens to carry earlier in the page.
       if (widgets.length > 0) {
         const scripts = widgets
           .map((kind) => `<script is:inline src="/assets/js/uncage-runtime/${kind}.js" defer></script>`)
           .join('');
-        html = html.replace('</body>', scripts + '</body>');
+        const bodyCloseIdx = html.lastIndexOf('</body>');
+        if (bodyCloseIdx !== -1) {
+          html = html.slice(0, bodyCloseIdx) + scripts + html.slice(bodyCloseIdx);
+        }
       }
 
       // Frontmatter imports for the CSS blocks Pass 1 pulled out of this

@@ -510,6 +510,37 @@ describe('Astro format: uncage-runtime widget injection', () => {
     expect(scriptIdx).toBeGreaterThan(0);
     expect(scriptIdx).toBeLessThan(bodyCloseIdx);
   });
+
+  it('inserts before the REAL closing </body> tag, not a fake one embedded in third-party script text', async () => {
+    // Reproduces a real bug found live on a Webflow template (linoxa):
+    // a third-party promo widget's own bundled script carried a
+    // developer-instructions comment that itself contained the literal
+    // text "</body>" as example text (documenting where a site owner
+    // should paste an embed snippet). A naive first-match string
+    // replace spliced the widget scripts into that fake occurrence
+    // instead of the page's real closing tag, leaving the actual
+    // </body> untouched later in the document -- two </body> for one
+    // <body>, which fails Astro's compiler.
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="w-slider"><div class="w-slide">A</div><div class="w-slide">B</div></div>' +
+      '<script>/* ADD IT: one line before your own script tag </body> on any template */</script>' +
+      '</body></html>';
+    const { astro } = await compilePage(html);
+    // The fake </body> text inside the script comment is untouched inert
+    // content -- still one literal occurrence, plus the real closing tag,
+    // so two raw substring matches is correct and expected here. What
+    // actually matters: the injected script lands after the FAKE
+    // occurrence (proving it wasn't spliced into the comment text, which
+    // is where the bug put it) and before the REAL one (proving it
+    // targets the page's actual closing tag).
+    const fakeBodyIdx = astro.indexOf('on any template');
+    const scriptIdx = astro.indexOf('uncage-runtime/carousel.js');
+    const realBodyCloseIdx = astro.lastIndexOf('</body>');
+    expect(fakeBodyIdx).toBeGreaterThan(0);
+    expect(scriptIdx).toBeGreaterThan(fakeBodyIdx);
+    expect(scriptIdx).toBeLessThan(realBodyCloseIdx);
+  });
 });
 
 describe('Astro format: strip Framer/Webflow hydration JS', () => {
