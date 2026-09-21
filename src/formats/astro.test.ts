@@ -444,3 +444,64 @@ describe('Astro format: SplitText duplicate-DOM guard script wiring', () => {
     expect(astro).toContain('MutationObserver');
   });
 });
+
+describe('Astro format: strips baked-in GSAP pre-reveal opacity:0 (degenerate .from() tween fix)', () => {
+  const tmpDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function compileOnePage(html: string): Promise<string> {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uncage-astro-revealfix-test-'));
+    tmpDirs.push(outputDir);
+    await astroStrategy.compile(outputDir, { '/test': html });
+    return fs.readFile(path.join(outputDir, 'src', 'pages', 'test.astro'), 'utf-8');
+  }
+
+  it('strips the whole inline style when GSAP marker + opacity:0 are both present (real hollow bug)', async () => {
+    // Reproduces the real, confirmed-live structure verbatim: a
+    // "Meet the Team" card whose reveal never fires because the
+    // captured opacity:0 gets read back as the .from() tween's own
+    // "natural" end value on every fresh page load.
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="card-team" style="translate: none; rotate: none; scale: none; opacity: 0; transform: translate3d(0px, 0px, 0px);">Card</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+
+    expect(astro).toContain('<div class="card-team">Card</div>');
+    expect(astro).not.toContain('opacity: 0');
+  });
+
+  it('does NOT strip the style when opacity is 1 (stuckTransformGuard\'s own territory, not this bug)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="card" style="translate: none; rotate: none; scale: none; opacity: 1; transform: translate(0%, -50%) translate3d(0px, 0px, 0px);">Card</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+
+    expect(astro).toContain('opacity: 1');
+    expect(astro).toContain('translate(0%, -50%)');
+  });
+
+  it('does NOT strip a partial opacity (0.4, 0.5, etc.) -- only exact opacity:0', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="letter" style="translate: none; rotate: none; scale: none; opacity: 0.4;">S</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+
+    expect(astro).toContain('opacity: 0.4');
+  });
+
+  it('does NOT touch opacity:0 without the GSAP marker (not confirmed JS-applied, could be intentional)', async () => {
+    const html =
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<div class="sr-only" style="opacity: 0;">Screen reader text</div>' +
+      '</body></html>';
+    const astro = await compileOnePage(html);
+
+    expect(astro).toContain('opacity: 0');
+  });
+});

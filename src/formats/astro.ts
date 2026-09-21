@@ -237,6 +237,49 @@ export const astroStrategy: ExporterStrategy = {
         }
       });
 
+      // GSAP `.from()`-style entrance-reveal animations (common in
+      // Webflow templates: fade/slide/blur-in cards, headings, etc.)
+      // capture their "natural" end-state from the element's CURRENT
+      // computed style at tween-CREATION time (immediateRender +
+      // runBackwards under the hood), then immediately render the
+      // "from" (hidden) state -- exactly what a crawler captures
+      // mid-page-load, before any scroll has happened. Confirmed live
+      // on hollow's "Meet the Team" cards: shipping that captured
+      // opacity:0 as the page's OWN initial served state means
+      // Webflow's identical, unmodified init script re-runs its
+      // .from() setup on every fresh page load and reads the ALREADY-
+      // baked-in opacity:0 as the "natural" value to reveal TOWARD --
+      // producing a tween that animates from 0 to 0, a permanent
+      // no-op. Confirmed via a live side-by-side scroll test: the
+      // exact same synthetic scroll event correctly reveals the cards
+      // on the original live site (opacity 0 -> 1) but never fires
+      // visibly on our captured export, even given several seconds of
+      // uninterrupted wait time -- not a timing/interruption issue,
+      // the underlying tween itself is degenerate.
+      //
+      // Fixed by stripping the whole inline style attribute at export
+      // time for any element carrying both GSAP's own CSS Individual
+      // Transform Properties reset (`translate: none; rotate: none;
+      // scale: none;` -- never present on a plain CSS-authored
+      // transform, confirmed elsewhere in this file) AND a baked-in
+      // `opacity: 0` -- restoring the element to its true CSS-authored
+      // (visible) state on first paint. Webflow's own unmodified init
+      // script then runs FRESH against that correct starting point,
+      // exactly as it would on the original live site's own first
+      // load, and correctly re-captures opacity:1 as the natural value
+      // before re-hiding and re-revealing it on scroll as designed.
+      // Scoped specifically to opacity:0 (not opacity:1, which is
+      // stuckTransformGuard's own separate, already-revealed-but-one-
+      // leftover-term territory below) -- an element mid-way through a
+      // correctly firing animation never sits at exactly this
+      // combination on first paint.
+      $('[style]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        if (/translate:\s*none;\s*rotate:\s*none;\s*scale:\s*none;/.test(style) && /opacity:\s*0(?:[^.]|$)/.test(style)) {
+          $(el).removeAttr('style');
+        }
+      });
+
       const promoClass = detectPromoWidgetClass($);
 
       // Pull <style> blocks out for cross-page extraction. Left in place
