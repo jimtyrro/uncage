@@ -36,6 +36,13 @@ A few common reasons:
 - **Missing assets**: Some resources (lazy-loaded images, web fonts loaded conditionally) may not have been intercepted during the crawl.
 - **External APIs**: If the site fetches data from an API, that data will not be available in the static export.
 
+## Can I edit text or content in the exported pages?
+
+Depends on the source platform, because the platform's own runtime JS ships with the export:
+
+- **Webflow exports: yes.** `webflow.js` animates existing markup but never re-renders content, so edits to the HTML/`.astro` source persist in the browser.
+- **Framer exports: no, not at the HTML level.** Framer's React runtime hydrates `#main` from content baked into its JS bundle and replaces the server HTML. Verified on a real export: an edited `<h1>` rendered on first paint, then reverted to the original text within seconds of hydration. This applies to any HTML-level editing, whether by hand or through a visual builder that writes HTML. The only ways out are removing the Framer runtime (which breaks its interactive widgets) or rebuilding the page.
+
 ## Does it handle single-page applications (SPAs)?
 
 Partially. Uncage renders each page in a real browser, so it captures the fully rendered HTML. However, client-side routing in SPAs means that the crawler may not discover all routes. Use `--max-depth` and `--max-pages` to control how far it explores.
