@@ -43,6 +43,8 @@ Depends on the source platform, because the platform's own runtime JS ships with
 - **Webflow exports: yes.** `webflow.js` animates existing markup but never re-renders content, so edits to the HTML/`.astro` source persist in the browser.
 - **Framer exports: no, not at the HTML level.** Framer's React runtime hydrates `#main` from content baked into its JS bundle and replaces the server HTML. Verified on a real export: an edited `<h1>` rendered on first paint, then reverted to the original text within seconds of hydration. This applies to any HTML-level editing, whether by hand or through a visual builder that writes HTML. The only ways out are removing the Framer runtime (which breaks its interactive widgets) or rebuilding the page.
 
+Tools that map a clicked element back to its source line (visual editors, the Astro dev toolbar) get no help from Astro 7 exports: Astro 7's Rust compiler does not emit the `data-astro-source-file` / `data-astro-source-loc` dev attributes, even with the dev toolbar enabled (verified on Astro 7.3.3). Such tools have to fall back to searching the source text.
+
 ## Does it handle single-page applications (SPAs)?
 
 Partially. Uncage renders each page in a real browser, so it captures the fully rendered HTML. However, client-side routing in SPAs means that the crawler may not discover all routes. Use `--max-depth` and `--max-pages` to control how far it explores.
